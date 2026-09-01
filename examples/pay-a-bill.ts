@@ -7,9 +7,9 @@
  *
  * Uses a sandbox key against the local stack: no portal is touched and no money moves.
  *
- * In your own code this import is just:
- *   import { BillPayClient, newRef, payRefFor } from '@terminaldz/billpay-sdk';
- * Here it points at the built output so the example exercises the real artifact.
+ * The import below is exactly what you write in your own project. Inside this repo it
+ * resolves by self-reference through the package's own `exports` map, so the example
+ * runs against the built artifact rather than a private path.
  */
 
 import {
@@ -19,7 +19,7 @@ import {
   BillPayNotFoundError,
   newRef,
   payRefFor,
-} from '../dist/index.js';
+} from '@terminaldz/billpay-sdk';
 
 const client = new BillPayClient({
   apiKey: process.env.BILLPAY_API_KEY ?? 'sk_sbx_partner_a',

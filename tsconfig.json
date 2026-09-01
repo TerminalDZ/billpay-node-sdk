@@ -18,7 +18,16 @@
     "forceConsistentCasingInFileNames": true,
     "verbatimModuleSyntax": true,
     "isolatedModules": true,
-    "noEmit": true
+    "noEmit": true,
+
+    // `examples/` imports the package by its own name, exactly as a partner would.
+    // At runtime Node resolves that through the `exports` map in package.json
+    // (self-reference) to dist/. For typechecking there is no dist yet — CI
+    // typechecks before it builds — so point the name at the source instead.
+    "baseUrl": ".",
+    "paths": {
+      "@terminaldz/billpay-sdk": ["./src/index.ts"]
+    }
   },
   "include": ["src", "tests", "examples"]
 }
