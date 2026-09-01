@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: ['18', '20', '22']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run lint
+
+      - run: npm run typecheck
+
+      # Unit only. The integration suite in tests/integration talks to the local
+      # BillPayManager stack on http://localhost:3100, which does not exist on a CI
+      # runner — it is run by hand against a stack started with
+      # `billPayManager/scripts/run-local.ps1 up`. It skips rather than fails when the
+      # stack is absent, but there is no value in running it here.
+      - run: npm test
+
+      - run: npm run build
+
+      - run: npm pack --dry-run
