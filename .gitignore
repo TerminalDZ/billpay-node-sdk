@@ -1,0 +1,15 @@
+node_modules/
+dist/
+coverage/
+*.tgz
+*.log
+
+# Never commit real credentials. Ship .env.example instead.
+.env
+.env.*
+!.env.example
+
+.DS_Store
+.idea/
+.vscode/
+.scratch/

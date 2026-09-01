@@ -1,0 +1,64 @@
+{
+  "name": "@terminaldz/billpay-sdk",
+  "version": "0.1.0",
+  "description": "Official Node.js/TypeScript SDK for the OneClickDz Bill Payment API (/v3).",
+  "license": "MIT",
+  "author": "OneClickDz",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/terminaldz/billpay-node-sdk.git"
+  },
+  "homepage": "https://github.com/terminaldz/billpay-node-sdk#readme",
+  "bugs": {
+    "url": "https://github.com/terminaldz/billpay-node-sdk/issues"
+  },
+  "keywords": [
+    "oneclickdz",
+    "billpay",
+    "algeria",
+    "payments",
+    "sdk"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "test": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration",
+    "test:watch": "vitest",
+    "example": "node --experimental-strip-types examples/pay-a-bill.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.13.0",
+    "@types/node": "^22.7.0",
+    "eslint": "^9.13.0",
+    "prettier": "^3.3.3",
+    "tsup": "^8.3.0",
+    "typescript": "^5.6.3",
+    "typescript-eslint": "^8.11.0",
+    "vitest": "^2.1.4"
+  }
+}
