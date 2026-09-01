@@ -6,11 +6,16 @@ on:
   pull_request:
 
 jobs:
-  build:
+  test:
+    # vitest 4 imports `styleText` from node:util and so needs Node 20+. That is a
+    # constraint on the test runner, not on the package: the published SDK supports
+    # Node 18, which the `compat` job below proves against the built artifact.
+    name: lint · typecheck · test · build
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        node: ['18', '20', '22']
+        node: ['20', '22']
 
     steps:
       - uses: actions/checkout@v4
@@ -36,3 +41,48 @@ jobs:
       - run: npm run build
 
       - run: npm pack --dry-run
+
+  compat:
+    # The package claims Node >=18, so prove the built artifact actually loads and
+    # runs there — through both entry points, since a broken `exports` map is the
+    # usual way a dual CJS/ESM build ships broken.
+    name: node ${{ matrix.node }} loads the built package
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['18', '20', '22']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run build
+
+      - name: require() the built package
+        run: |
+          node -e "
+            const sdk = require('./dist/index.cjs');
+            if (typeof sdk.BillPayClient !== 'function') throw new Error('BillPayClient missing');
+            if (sdk.isTerminal('UNKNOWN') !== false) throw new Error('UNKNOWN must not be terminal');
+            if (sdk.newRef('x').length > 100) throw new Error('ref exceeds 100 chars');
+            new sdk.BillPayClient({ apiKey: 'k' });
+            console.log('CJS ok on node ' + process.version);
+          "
+
+      - name: import the built package
+        run: |
+          node --input-type=module -e "
+            import { BillPayClient, isTerminal, newRef } from './dist/index.js';
+            if (typeof BillPayClient !== 'function') throw new Error('BillPayClient missing');
+            if (isTerminal('UNKNOWN') !== false) throw new Error('UNKNOWN must not be terminal');
+            if (newRef('x').length > 100) throw new Error('ref exceeds 100 chars');
+            new BillPayClient({ apiKey: 'k' });
+            console.log('ESM ok on node ' + process.version);
+          "
