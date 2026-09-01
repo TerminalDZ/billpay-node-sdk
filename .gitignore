@@ -9,6 +9,10 @@ coverage/
 .env.*
 !.env.example
 
+# `npm publish` and actions/setup-node both write a registry auth token into a
+# local .npmrc. It must never be committed.
+.npmrc
+
 .DS_Store
 .idea/
 .vscode/
