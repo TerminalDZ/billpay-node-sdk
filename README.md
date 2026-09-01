@@ -18,6 +18,28 @@ Full API reference: <https://docs.oneclickdz.com>
 npm install @terminaldz/billpay-sdk
 ```
 
+<details>
+<summary>Installing from GitHub Packages instead</summary>
+
+The same version is mirrored to GitHub Packages. To install from there, point the
+scope at GitHub in an `.npmrc` beside your `package.json`:
+
+```ini
+@terminaldz:registry=https://npm.pkg.github.com
+```
+
+GitHub Packages requires authentication even for public packages, so you will also
+need a personal access token with `read:packages`:
+
+```ini
+//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}
+```
+
+The npm registry needs none of this. Prefer it unless your organisation standardises
+on GitHub Packages.
+
+</details>
+
 ## Quickstart
 
 ```ts

@@ -1,0 +1,85 @@
+name: Release
+
+# Publishes the same version to both registries: npm for partners, and GitHub
+# Packages as a mirror. Runs on a published GitHub release, or manually.
+#
+# Requires one repository secret:
+#   NPM_TOKEN — an npm automation token for the @terminaldz scope.
+# GitHub Packages uses the built-in GITHUB_TOKEN; no secret needed for it.
+#
+# Publishing is version-gated by the registries themselves: re-running with a
+# version that already exists fails rather than overwriting.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  verify:
+    # Never publish something that has not passed the same gate as a normal push.
+    name: verify before publishing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm pack --dry-run
+
+  npm:
+    name: publish to npm
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required for npm provenance, which attests that this tarball was built
+      # from this commit in this workflow.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+          scope: '@terminaldz'
+          cache: npm
+
+      - run: npm ci
+
+      # prepublishOnly builds, so dist/ is fresh in the tarball.
+      - run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  github-packages:
+    name: publish to GitHub Packages
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@terminaldz'
+          cache: npm
+
+      - run: npm ci
+
+      # No --provenance here: GitHub Packages does not consume npm's provenance
+      # attestations, and passing it fails the publish.
+      - run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
