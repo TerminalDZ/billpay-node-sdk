@@ -54,8 +54,22 @@ jobs:
 
       - run: npm ci
 
+      # The `secrets` context is not available in a job-level `if:`, so the guard
+      # lives here. Without it a missing token surfaces as an opaque auth error
+      # and takes the whole release red, which hides whether the GitHub Packages
+      # half succeeded.
+      - id: token
+        run: |
+          if [ -z "${NPM_TOKEN}" ]; then
+            echo "::warning::NPM_TOKEN is not set — skipping the npm publish. Add the secret and re-run to publish to registry.npmjs.org."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
       # prepublishOnly builds, so dist/ is fresh in the tarball.
-      - run: npm publish --access public --provenance
+      - if: steps.token.outputs.skip != 'true'
+        run: npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
