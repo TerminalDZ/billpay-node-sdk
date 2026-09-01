@@ -58,17 +58,28 @@ jobs:
       # lives here. Without it a missing token surfaces as an opaque auth error
       # and takes the whole release red, which hides whether the GitHub Packages
       # half succeeded.
-      - id: token
+      # Two reasons to skip, both of which must not fail the release:
+      #  - no token, so this registry is simply not configured yet;
+      #  - this version is already published here, which happens whenever one
+      #    registry succeeded and the other did not, and the release is re-run.
+      - id: gate
         run: |
           if [ -z "${NPM_TOKEN}" ]; then
-            echo "::warning::NPM_TOKEN is not set — skipping the npm publish. Add the secret and re-run to publish to registry.npmjs.org."
+            echo "::warning::NPM_TOKEN is not set — skipping the npm publish. Add the secret and re-run."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          V=$(node -p "require('./package.json').version")
+          if npm view "@terminaldz/billpay-sdk@$V" version >/dev/null 2>&1; then
+            echo "::notice::@terminaldz/billpay-sdk@$V is already on npm — nothing to publish."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           fi
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       # prepublishOnly builds, so dist/ is fresh in the tarball.
-      - if: steps.token.outputs.skip != 'true'
+      - if: steps.gate.outputs.skip != 'true'
         run: npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -92,8 +103,21 @@ jobs:
 
       - run: npm ci
 
+      # Same idempotence guard as the npm job: re-running a release whose other
+      # half failed must not fail here just because this version already landed.
+      - id: gate
+        run: |
+          V=$(node -p "require('./package.json').version")
+          if npm view "@terminaldz/billpay-sdk@$V" version --registry=https://npm.pkg.github.com >/dev/null 2>&1; then
+            echo "::notice::@terminaldz/billpay-sdk@$V is already on GitHub Packages — nothing to publish."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       # No --provenance here: GitHub Packages does not consume npm's provenance
       # attestations, and passing it fails the publish.
-      - run: npm publish
+      - if: steps.gate.outputs.skip != 'true'
+        run: npm publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
