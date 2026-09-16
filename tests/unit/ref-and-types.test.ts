@@ -8,7 +8,7 @@ import {
   type AccountIdentifier,
   type DiscoverParams,
 } from '../../src/index.js';
-import { ok, stubFetch } from './helpers.js';
+import { ok, stubFetch, TXN_ID, txn } from './helpers.js';
 
 describe('newRef', () => {
   it('generates a valid, unique ref with no prefix', () => {
@@ -97,12 +97,13 @@ describe('account identifier union', () => {
     const accounts: AccountIdentifier[] = [
       { reference: '0123456789012345678901234' },
       { contractNumber: '9876543210' },
-      { aadlNumber: '1112223334' },
       { phoneNumber: '023456789' },
       { electronic_payment_key: '0123456789012345678901234' },
       { phone_number: '023456789' },
       { sonelgaz: { invoice_number: '9876543210', amount_without_stamp: '15000', ebb_key: 'ABC' } },
       { ade: { sub_id: '000123456789', period: '07/2026', amount: '12000', pay_key: '1234567' } },
+      { aadl: { codeloc: '1112223334' } },
+      { aadl: { codeloc: '1112223334', billnum: '778899', amount: '5400.00' } },
     ];
 
     for (const account of accounts) {
@@ -124,6 +125,13 @@ describe('account identifier union', () => {
       reference: 'a',
       sonelgaz: { invoice_number: '1', amount_without_stamp: '2', ebb_key: '3' },
     };
+    expect(bad).toBeDefined();
+  });
+
+  it('rejects the retired aadlNumber shorthand at compile time', () => {
+    // @ts-expect-error — AADL takes `aadl{ codeloc }`; the flat shorthand was removed
+    // and the API now answers 400 "account.aadlNumber is not allowed".
+    const bad: AccountIdentifier = { aadlNumber: '1112223334' };
     expect(bad).toBeDefined();
   });
 
@@ -150,5 +158,55 @@ describe('account identifier union', () => {
       ref: 'r',
     };
     expect(p.partner).toBe('Algérie Télécom');
+  });
+});
+
+describe('bill breakdown', () => {
+  const read = async (bills: unknown[]) => {
+    const s = stubFetch([
+      {
+        json: ok(
+          txn({
+            status: 'READY',
+            partner: 'AADL',
+            account: { codeloc: '2223334445' },
+            bills,
+          }),
+        ),
+      },
+    ]);
+    const c = new BillPayClient({ apiKey: 'k', baseUrl: 'http://api.test', fetch: s.fetch });
+    return c.bills.get(TXN_ID);
+  };
+
+  it('surfaces the partner-supplied components of an aggregate total', async () => {
+    const t = await read([
+      {
+        billId: 'b1',
+        amount: 12000,
+        fee: 50,
+        period: 'Juillet 2026',
+        breakdown: {
+          totalRent: 10000,
+          totalCharges: 800,
+          totalPenalties: 1200,
+          unpaidPeriods: 2,
+          site: 'Cite Sandbox B',
+        },
+      },
+    ]);
+
+    const b = t.bills?.[0]?.breakdown;
+    expect(b?.totalRent).toBe(10000);
+    expect(b?.totalCharges).toBe(800);
+    expect(b?.totalPenalties).toBe(1200);
+    // Two periods are folded into the one payable total — hence no paying a subset.
+    expect(b?.unpaidPeriods).toBe(2);
+    expect(b?.site).toBe('Cite Sandbox B');
+  });
+
+  it('leaves breakdown undefined when the partner publishes none', async () => {
+    const t = await read([{ billId: 'b1', amount: 443.39, fee: 25 }]);
+    expect(t.bills?.[0]?.breakdown).toBeUndefined();
   });
 });

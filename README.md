@@ -135,6 +135,19 @@ An empty `bills` array means nothing is payable. That covers both "nothing is du
 and "everything owed is under the 200 DZD discovery floor". It is not an error, and
 there is no `NO_BILLS_FOUND` code — despite what `openapi.yaml` suggests.
 
+### A bill may carry a `breakdown`
+
+Some partners publish what makes up a bill's `amount`. Today that is AADL, whose total
+is an aggregate — rent plus charges plus late penalties across `unpaidPeriods` periods
+— which is why a tenant cannot pay part of it.
+
+```ts
+bill.breakdown; // { totalRent, totalCharges, totalPenalties, unpaidPeriods, site, dueDate }
+```
+
+Every field is optional and present only when the partner supplies it. Most bills have
+no `breakdown` at all; treat a missing one as "not published", never as zeroes.
+
 ---
 
 ## The `ref` rules
@@ -229,7 +242,7 @@ Inside a `FAILED` or `REFUNDED` transaction, `error.code` is one of
 | `ADE` | `reference` |
 | `SEAAL` | `reference` |
 | `SONELGAZ` | `contractNumber` |
-| `AADL` | `aadlNumber` |
+| `AADL` | `aadl{ codeloc, billnum?, amount? }` |
 | `Algérie Télécom` | `phoneNumber` |
 
 `'Algérie Télécom'` carries its accents — it is the literal value the API matches.
@@ -242,9 +255,20 @@ error:
 { reference: '…', contractNumber: '…' } // ❌ does not compile
 ```
 
-The nested invoice forms (`sonelgaz{}`, `ade{}`) and the snake_case forms
+The nested forms (`sonelgaz{}`, `ade{}`, `aadl{}`) and the snake_case forms
 (`electronic_payment_key`, exactly 25 characters; `phone_number`) are also accepted.
-Responses always echo the camelCase form.
+Responses echo a single **flat** key — `reference`, `contractNumber`, `codeloc` or
+`phoneNumber` — so a nested `ade{}` comes back as `reference` and a nested `aadl{}`
+comes back as `codeloc`.
+
+AADL is nested-only: `aadl.codeloc` is digits, 6–20 characters, always required, and
+`billnum`/`amount` are all-or-nothing — both for a known avis (DIRECT), neither to let
+the partner find what is owed (LOOKUP). One without the other is `400 ERR_VALIDATION`.
+
+```ts
+{ aadl: { codeloc: '1112223334' } }                                  // LOOKUP
+{ aadl: { codeloc: '1112223334', billnum: '…', amount: '5400.00' } } // DIRECT
+```
 
 `SEAAL` and `AADL` are currently disabled and answer `503 PARTNER_UNAVAILABLE`. Check
 `client.partners()` before offering a partner rather than finding out at payment time.
@@ -273,7 +297,7 @@ deterministic.
 | Refunded | ADE | `reference: 0123456789012340000000005` | `REFUNDED` |
 | Under review | SONELGAZ | `sonelgaz{invoice_number: 6006006006, …}` | `UNKNOWN` (~60 s) → `REFUNDED` |
 | Invalid account | ADE | `reference: abc0000000000000000000000` | `400 INVALID_ACCOUNT` |
-| Partner down | AADL | `aadlNumber: 1112223334` | `503 PARTNER_UNAVAILABLE` |
+| Partner down | AADL | `aadl{codeloc: 1112223334}` | `503 PARTNER_UNAVAILABLE` |
 | Already paid | ADE | `reference: 0123456789012347777777777` | `409 BILL_ALREADY_PAID` |
 
 ---

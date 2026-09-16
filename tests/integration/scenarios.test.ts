@@ -191,7 +191,11 @@ describe('discovery outcomes', () => {
   it('disabled partner → 503 PARTNER_UNAVAILABLE', async () => {
     if (!need()) return;
     const e = (await client()
-      .bills.discover({ partner: 'AADL', account: { aadlNumber: '1112223334' }, ref: newRef('it') })
+      .bills.discover({
+        partner: 'AADL',
+        account: { aadl: { codeloc: '1112223334' } },
+        ref: newRef('it'),
+      })
       .catch((x: unknown) => x)) as BillPayUnavailableError;
 
     expect(e).toBeInstanceOf(BillPayUnavailableError);

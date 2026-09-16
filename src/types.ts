@@ -42,19 +42,20 @@ export type PartnersMap = Record<string, { status: PartnerStatus }>;
  * "one field, plus every other field explicitly `never`", which is what stops
  * TypeScript from silently accepting an object with two identifiers.
  *
- * Responses always echo the camelCase form, keyed by partner:
- * `reference` (ADE, SEAAL) · `contractNumber` (SONELGAZ) · `aadlNumber` (AADL) ·
- * `phoneNumber` (Algérie Télécom).
+ * Responses echo a **flat** identifier, keyed by partner:
+ * `reference` (ADE, SEAAL) · `contractNumber` (SONELGAZ) · `codeloc` (AADL) ·
+ * `phoneNumber` (Algérie Télécom). The nested request forms (`ade{}`, `aadl{}`) are
+ * flattened on the way out — `ade{}` echoes as `reference`, `aadl{}` as `codeloc`.
  */
 export type AccountIdentifier =
   | ReferenceAccount
   | ContractNumberAccount
-  | AadlNumberAccount
   | PhoneNumberAccount
   | ElectronicPaymentKeyAccount
   | PhoneNumberSnakeAccount
   | SonelgazInvoiceAccount
-  | AdeInvoiceAccount;
+  | AdeInvoiceAccount
+  | AadlAccount;
 
 /** Only the listed key may be present; the rest are pinned to `never`. */
 type Only<K extends string> = { [P in Exclude<AccountKey, K>]?: never };
@@ -62,21 +63,18 @@ type Only<K extends string> = { [P in Exclude<AccountKey, K>]?: never };
 type AccountKey =
   | 'reference'
   | 'contractNumber'
-  | 'aadlNumber'
   | 'phoneNumber'
   | 'electronic_payment_key'
   | 'phone_number'
   | 'sonelgaz'
-  | 'ade';
+  | 'ade'
+  | 'aadl';
 
 /** ADE and SEAAL. Max 50 characters. */
 export type ReferenceAccount = { reference: string } & Only<'reference'>;
 
 /** SONELGAZ. Max 50 characters. */
 export type ContractNumberAccount = { contractNumber: string } & Only<'contractNumber'>;
-
-/** AADL. Max 50 characters. */
-export type AadlNumberAccount = { aadlNumber: string } & Only<'aadlNumber'>;
 
 /** Algérie Télécom. Algerian landline: `^(0|\+213)[2-4][0-9]{7}$`. */
 export type PhoneNumberAccount = { phoneNumber: string } & Only<'phoneNumber'>;
@@ -97,6 +95,19 @@ export type SonelgazInvoiceAccount = {
 export type AdeInvoiceAccount = {
   ade: { sub_id: string; period: string; amount: string; pay_key: string };
 } & Only<'ade'>;
+
+/**
+ * AADL. The only AADL identifier — the flat shorthand was removed in 0.2.0 and is
+ * now rejected as an unknown key.
+ *
+ * `codeloc` is digits only, 6–20 characters, and always required. `billnum` and
+ * `amount` are **all-or-nothing**: send both to pay a known avis directly (DIRECT),
+ * or neither to let the partner find what is owed (LOOKUP). One without the other is
+ * `400 ERR_VALIDATION` — "aadl.billnum and aadl.amount must be supplied together".
+ */
+export type AadlAccount = {
+  aadl: { codeloc: string; billnum?: string; amount?: string };
+} & Only<'aadl'>;
 
 // ─── Statuses ─────────────────────────────────────────────────────────────────
 
@@ -192,6 +203,30 @@ export interface ValidateResult {
   key: { type: 'SANDBOX' | 'PRODUCTION' };
 }
 
+/**
+ * The partner's own explanation of what makes up a bill's `amount`. Present only when
+ * the partner publishes one — today that is AADL, where the total is an aggregate of
+ * rent, charges and late penalties across `unpaidPeriods` periods, which is why a
+ * tenant cannot pay a subset of it.
+ *
+ * Every field is optional and emitted only when the partner supplies it. Treat a
+ * missing `breakdown` as "no breakdown published", never as zeroes.
+ */
+export interface BillBreakdown {
+  /** Rent component. */
+  totalRent?: number;
+  /** Charges component. */
+  totalCharges?: number;
+  /** Late penalties. */
+  totalPenalties?: number;
+  /** How many periods are folded into the aggregate. */
+  unpaidPeriods?: number;
+  /** Residence / programme label. */
+  site?: string;
+  /** Human due-date label, not an ISO timestamp. */
+  dueDate?: string;
+}
+
 /** One payable bill. `fee` is already included in `Transaction.total` when selected. */
 export interface Bill {
   billId: string;
@@ -199,6 +234,8 @@ export interface Bill {
   fee: number;
   label?: string;
   period?: string;
+  /** Partner-supplied component breakdown of `amount`. Absent for most partners. */
+  breakdown?: BillBreakdown;
 }
 
 /**
@@ -214,6 +251,10 @@ export interface Transaction {
   type: 'discovery' | 'payment';
   status: TransactionStatus;
   partner: string;
+  /**
+   * The identifier echoed **flat**, one key: `reference` (ADE, SEAAL) ·
+   * `contractNumber` (SONELGAZ) · `codeloc` (AADL) · `phoneNumber` (Algérie Télécom).
+   */
   account: Record<string, string>;
   currency: string;
   createdAt: string;

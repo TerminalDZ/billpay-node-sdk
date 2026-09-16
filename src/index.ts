@@ -27,10 +27,11 @@ export { newRef, payRefFor, isValidRef, REF_MAX_LENGTH } from './ref.js';
 export { PARTNERS, TERMINAL_STATUSES, isTerminal } from './types.js';
 
 export type {
-  AadlNumberAccount,
+  AadlAccount,
   AccountIdentifier,
   AdeInvoiceAccount,
   Bill,
+  BillBreakdown,
   BillPayClientOptions,
   ContractNumberAccount,
   DiscoverAck,
