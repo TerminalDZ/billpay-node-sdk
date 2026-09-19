@@ -435,10 +435,19 @@ describe.skipIf(!liveAadl)('AADL — one aggregate avis, addressed by codeloc', 
         expect(outcome.code).toBe('NOT_FOUND');
         expect(outcome.httpStatus).toBe(404);
         expect(outcome.message).toBeTruthy();
+
+        // The reason a caller can write this branch once and never revisit it: today
+        // the refusal never reaches the application, so it is flagged as a missing
+        // endpoint rather than as an answer about this transaction. This transaction
+        // is AADL and has resolved a housing file, so the only honest reading of a
+        // 404 here is "not deployed yet".
+        expect(outcome.enveloped).toBe(false);
+        expect(outcome.isEndpointMissing).toBe(true);
       } else {
         const avis = outcome as Avis;
         expect(avis.bytes.byteLength).toBeGreaterThan(0);
         expect(avis.contentType).toContain('pdf');
+        expect(avis.filename).toMatch(/\.pdf$/);
       }
     },
     ROUND_TRIP,
@@ -768,6 +777,36 @@ describe.skipIf(!liveTelecom)('Algérie Télécom — the landline row', () => {
       expect(txn.account).toEqual({ phoneNumber: LANDLINE });
       expect(txn.bills).toHaveLength(1);
       expect(txn.bills![0]!.amount).toBe(300);
+
+      // Non-terminal, nothing paid, no selectedBill — and `completedAt` is set anyway.
+      // The field marks when the current phase stopped working, not when the
+      // transaction finished, so `if (txn.completedAt) markSettled(txn)` drops an unpaid
+      // discovery out of the queue. Branch on `status`.
+      expect(isTerminal(txn.status)).toBe(false);
+      expect(txn.completedAt).toBeTruthy();
+      expect(txn.selectedBill).toBeUndefined();
+    },
+    NET,
+  );
+
+  it(
+    'refuses the international spelling of the same landline',
+    async () => {
+      // The one per-field format the SDK states precisely, so it is worth stating
+      // correctly: `+213…` is not an accepted way to write `023456789`. A front end that
+      // normalises phone input to E.164 gets ERR_VALIDATION — a code the SDK's own docs
+      // say to log and never show the customer, on a number they typed correctly.
+      const e = await rejection<BillPayValidationError>(
+        client().bills.discover({
+          partner: 'Algérie Télécom',
+          account: { phoneNumber: '+21323456789' },
+          ref: mintRef('at-e164'),
+        }),
+      );
+
+      expect(e).toBeInstanceOf(BillPayValidationError);
+      expect(e.code).toBe('ERR_VALIDATION');
+      expect(e.httpStatus).toBe(400);
     },
     NET,
   );

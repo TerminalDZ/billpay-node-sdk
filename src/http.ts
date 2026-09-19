@@ -150,7 +150,7 @@ const buildUrl = (baseUrl: string, path: string, query?: RequestSpec['query']): 
  * can name a mitigation window in minutes. Thirty seconds is far above anything the API
  * documents and far below the point at which the wait stops being a backoff.
  */
-export const MAX_RETRY_AFTER_MS = 30_000;
+const MAX_RETRY_AFTER_MS = 30_000;
 
 /** Backoff for GET retries: 300ms, 600ms, 1200ms… capped, unless `Retry-After` says otherwise. */
 const backoffMs = (attempt: number, retryAfter?: number): number =>

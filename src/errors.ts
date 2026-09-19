@@ -33,6 +33,19 @@ export class BillPayError extends Error {
   readonly retryAfter?: number;
   /** `error.details` from the envelope, when present. */
   readonly details?: unknown;
+  /**
+   * Whether the refusal carried the house envelope — that is, whether it came from the
+   * application or merely from the router in front of it.
+   *
+   * `true` for anything the API itself decided, which is almost everything. `false`
+   * when the request was turned away before it reached the application: an unknown
+   * path, a proxy, a gateway. See {@link isEndpointMissing}, which is the useful
+   * reading of it.
+   *
+   * Local failures — a timeout, an aborted call, a dropped socket — never reached a
+   * server at all and are reported as `false`.
+   */
+  readonly enveloped: boolean;
 
   constructor(
     message: string,
@@ -42,6 +55,7 @@ export class BillPayError extends Error {
       requestId?: string | null;
       retryAfter?: number;
       details?: unknown;
+      enveloped?: boolean;
       cause?: unknown;
     },
   ) {
@@ -52,7 +66,38 @@ export class BillPayError extends Error {
     this.requestId = opts.requestId;
     this.retryAfter = opts.retryAfter;
     this.details = opts.details;
+    this.enveloped = opts.enveloped ?? false;
     Error.captureStackTrace?.(this, new.target);
+  }
+
+  /**
+   * Whether this deployment does not serve the endpoint at all.
+   *
+   * A `404` that never reached the application is the router saying "no such path",
+   * which is a different fact from the application saying "no such thing" — and the two
+   * are otherwise indistinguishable, because both arrive as `NOT_FOUND`.
+   *
+   * The distinction is live today on {@link BillsResource.avis}: the endpoint is
+   * documented and implemented here, but is not yet routed in the deployment, so it
+   * answers a router miss. Branch on this and your code needs no edit the day it ships —
+   * `true` means "not available here yet, try again later", while a `NOT_FOUND` with
+   * this `false` is the real answer: the transaction is not yours, is not AADL, or has
+   * not resolved a housing file.
+   *
+   * ```ts
+   * try {
+   *   const avis = await client.bills.avis(transactionId);
+   * } catch (err) {
+   *   if (err instanceof BillPayNotFoundError && err.isEndpointMissing) {
+   *     // Not deployed yet. Offer the receipt instead and check again another day.
+   *   } else if (err instanceof BillPayNotFoundError) {
+   *     // Deployed, and it has told you something: wrong partner, or no avis yet.
+   *   }
+   * }
+   * ```
+   */
+  get isEndpointMissing(): boolean {
+    return this.httpStatus === 404 && !this.enveloped;
   }
 
   /**
@@ -284,6 +329,8 @@ export const errorFromEnvelope = (opts: {
     requestId: opts.requestId,
     retryAfter: opts.retryAfter,
     details: opts.details,
+    // This one came out of the house envelope, so the application answered it.
+    enveloped: true,
   });
 };
 

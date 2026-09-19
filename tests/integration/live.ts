@@ -68,9 +68,9 @@ export const client = (overrides: Partial<BillPayClientOptions> = {}): BillPayCl
 /**
  * A token minted once per process and stamped into every `ref` the suite sends.
  *
- * Refs are unique per (account, partner) for as long as a transaction is live, so a
- * literal ref anywhere in this file would pass on the first run and answer
- * `403 DUPLICATED_REF` on the second. The token also makes a run greppable in the
+ * A ref is unique per partner for as long as a transaction is live — the account is not
+ * part of the key — so a literal ref anywhere in this file would pass on the first run
+ * and answer `403 DUPLICATED_REF` on the second. The token also makes a run greppable in the
  * partner's own transaction history, which is what you want at 2am when a suite leaves
  * something behind.
  */

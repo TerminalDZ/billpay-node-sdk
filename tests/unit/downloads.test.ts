@@ -57,11 +57,50 @@ describe('receipt', () => {
     expect(r.requestId).toBe('req_receipt');
   });
 
-  it('names the file after the transaction when the server does not', async () => {
+  it('names the file after the transaction, with an extension, when the server does not', async () => {
+    // Not an edge case: `Content-Disposition` is not CORS-safelisted and the API exposes
+    // no headers, so in a browser this fallback is the only name there is. `Content-Type`
+    // survives the same filter, and it is what keeps the `.png` on the end — a file saved
+    // without an extension is one neither Windows nor macOS will open on a double-click.
     const { c } = mk([{ bytes: PNG, headers: { 'content-type': 'image/png' } }]);
     const r = await c.bills.receipt(TXN_ID);
 
-    expect(r.filename).toBe(`receipt-${TXN_ID}`);
+    expect(r.filename).toBe(`receipt-${TXN_ID}.png`);
+  });
+
+  it('takes the extension from the content type, parameters and all', async () => {
+    const cases: Array<[string, string]> = [
+      ['image/png', '.png'],
+      ['image/jpeg', '.jpg'],
+      ['application/pdf', '.pdf'],
+      ['IMAGE/PNG', '.png'],
+      ['image/png; charset=binary', '.png'],
+    ];
+
+    for (const [contentType, ext] of cases) {
+      const { c } = mk([{ bytes: PNG, headers: { 'content-type': contentType } }]);
+      expect((await c.bills.receipt(TXN_ID)).filename).toBe(`receipt-${TXN_ID}${ext}`);
+    }
+  });
+
+  it('adds no extension to a type it cannot name honestly', async () => {
+    // A wrong extension is worse than none: it tells the operating system to open the
+    // file with something that will fail on it.
+    const { c } = mk([{ bytes: PNG, headers: { 'content-type': 'application/octet-stream' } }]);
+    expect((await c.bills.receipt(TXN_ID)).filename).toBe(`receipt-${TXN_ID}`);
+  });
+
+  it('survives a browser stripping every header it is not allowed to read', async () => {
+    // The CORS response filter leaves only the safelist, so `content-disposition` and
+    // `x-request-id` read as null however plainly they sat on the wire. The file still
+    // has to be saveable afterwards.
+    const { c } = mk([{ bytes: PNG, headers: { 'content-type': 'image/png' } }]);
+    const r = await c.bills.receipt(TXN_ID);
+
+    expect(r.filename).toBe(`receipt-${TXN_ID}.png`);
+    expect(r.contentType).toBe('image/png');
+    expect(r.requestId).toBeNull();
+    expect(Array.from(r.bytes)).toEqual(Array.from(PNG));
   });
 
   it('calls an untyped body octet-stream rather than guessing at it', async () => {
@@ -189,6 +228,48 @@ describe('avis', () => {
     expect(e.requestId).toBe('req_test000000000000000000');
   });
 
+  /**
+   * The branch a caller writes today so that nothing has to change the day the endpoint
+   * ships. Both refusals are `404 NOT_FOUND` and they mean opposite things: one says
+   * "this deployment has no such path", the other says "this transaction has no avis".
+   */
+  it('marks an unrouted endpoint as missing, and an application 404 as not missing', async () => {
+    const path = `/v3/bills/transactions/${TXN_ID}/avis`;
+    const { c: unrouted } = mk([{ status: 404, json: routerMiss(path) }]);
+    const { c: answered } = mk([
+      { status: 404, json: err('NOT_FOUND', 'This partner does not publish a downloadable avis.') },
+    ]);
+
+    const missing = (await settled(unrouted.bills.avis(TXN_ID))) as BillPayNotFoundError;
+    const real = (await settled(answered.bills.avis(TXN_ID))) as BillPayNotFoundError;
+
+    expect(missing.isEndpointMissing).toBe(true);
+    expect(missing.enveloped).toBe(false);
+
+    expect(real.isEndpointMissing).toBe(false);
+    expect(real.enveloped).toBe(true);
+    expect(real.message).toBe('This partner does not publish a downloadable avis.');
+  });
+
+  it('does not call a 404 on a routed endpoint missing, whatever sent it', async () => {
+    // receipt() is routed today, so its 404 is always the application's answer.
+    const { c } = mk([{ status: 404, json: err('NOT_FOUND', 'Transaction not found') }]);
+    const e = (await settled(c.bills.receipt(TXN_ID))) as BillPayNotFoundError;
+
+    expect(e.isEndpointMissing).toBe(false);
+  });
+
+  it('never reports a non-404 refusal as a missing endpoint', async () => {
+    const { c } = mk([
+      { status: 502, bytes: new TextEncoder().encode('<html>Bad Gateway</html>') },
+    ]);
+
+    const e = (await settled(c.bills.avis(TXN_ID))) as BillPayInternalError;
+    // Unenveloped, but a gateway failure is not "this path does not exist here".
+    expect(e.enveloped).toBe(false);
+    expect(e.isEndpointMissing).toBe(false);
+  });
+
   it('reports a non-JSON refusal by its status rather than by the bytes', async () => {
     const { c } = mk([
       { status: 502, bytes: new TextEncoder().encode('<html>Bad Gateway</html>') },
@@ -205,6 +286,28 @@ describe('avis', () => {
 
     expect(await settled(c.bills.avis('avis-please'))).toBeInstanceOf(BillPayValidationError);
     expect(s.calls).toHaveLength(0);
+  });
+});
+
+describe('the bytes a browser has to hand to a Blob', () => {
+  // These two assert nothing at runtime worth the name — they are there for
+  // `tsc --noEmit`, which is part of this suite's gate. Since TypeScript 5.7 a bare
+  // `Uint8Array` means `Uint8Array<ArrayBufferLike>`, which includes `SharedArrayBuffer`
+  // and is therefore not a `BlobPart`. `new Blob([receipt.bytes])` is the only way to
+  // show or save a receipt in a browser, and it would stop compiling in the consumer's
+  // own source — where `skipLibCheck` cannot hide it — the moment this type widened.
+  it('keeps Receipt.bytes narrowed to an ArrayBuffer-backed view', async () => {
+    const { c } = mk([{ bytes: PNG, headers: { 'content-type': 'image/png' } }]);
+    const r = await c.bills.receipt(TXN_ID);
+
+    const forBlob: Uint8Array<ArrayBuffer> = r.bytes;
+    expect(forBlob.buffer).toBeInstanceOf(ArrayBuffer);
+  });
+
+  it('refuses a shared-memory view at compile time', () => {
+    // @ts-expect-error — a SharedArrayBuffer-backed view is exactly what BlobPart rejects.
+    const shared: Receipt['bytes'] = new Uint8Array(new SharedArrayBuffer(4));
+    expect(shared).toBeDefined();
   });
 });
 

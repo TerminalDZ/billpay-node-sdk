@@ -175,6 +175,44 @@ will tell a customer their payment failed while it is on its way to succeeding.
 `waitForTerminal` keeps polling through `UNKNOWN` and never resolves on it. If you
 poll yourself, use the exported `isTerminal()` rather than a hand-written list.
 
+### A failed poll is not a failed payment
+
+`waitForReady` and `waitForTerminal` ride out transient read failures rather than ending
+the wait over one. A 5xx, a `429`, a dropped socket — none of them says anything about the
+transaction, so the poller keeps the last status it did see and carries on to its
+deadline. Only a refusal that will not change its mind — `404`, `401`, a malformed id —
+comes back to you mid-wait.
+
+So the wait ends in exactly two ways: the transaction reached the state you asked for, or
+`BillPayPollTimeoutError`. That error also covers the case where the reads themselves were
+the problem, with `lastStatus` undefined and the last refusal as `cause`. Both mean the
+same thing to your order state — nobody knows yet — so both belong in the branch that
+hands the id to background reconciliation, never in one that reports a failure to the
+customer.
+
+`timeoutMs` bounds the whole wait, reads included, so that handoff fires when you said it
+would even if one request hangs or the server asks for a long `Retry-After`.
+
+### Watching a wait from a UI
+
+The promise tells you where a transaction ended up, which is the wrong shape for anything
+with a screen attached: a payment that held on `UNKNOWN` for a minute and then refunded is,
+once it has settled, indistinguishable from one that refunded immediately — and those two
+want very different things said to the customer.
+
+`onPoll` is called with every transaction the loop reads, including the one it returns, so
+a UI can follow the states as they happen without reimplementing the backoff, the deadline
+and the cancellation:
+
+```ts
+const settled = await client.bills.waitForTerminal(transactionId, {
+  onPoll: (t) => showStatus(t.status), // PROCESSING → UNKNOWN → UNKNOWN → REFUNDED
+});
+```
+
+Keep it cheap, and do not rely on throwing from it: an exception there would abandon a wait
+that may have money behind it, so anything thrown is swallowed.
+
 ### `READY` with no bills is a normal result
 
 An empty `bills` array means nothing is payable. That covers both "nothing is due"
@@ -264,23 +302,6 @@ origin sends `5`, but a rate-limit rule at the edge can name minutes, and a tran
 sleeps through that turns your own deadline into a suggestion. No other 4xx is retried:
 those are yours to fix, and retrying them only burns the rate limit.
 
-### A failed poll is not a failed payment
-
-`waitForReady` and `waitForTerminal` ride out transient read failures rather than ending
-the wait over one. A 5xx, a `429`, a dropped socket — none of them says anything about the
-transaction, so the poller keeps the last status it did see and carries on to its
-deadline. Only a refusal that will not change its mind — `404`, `401`, a malformed id —
-comes back to you mid-wait.
-
-So the wait ends in exactly two ways: the transaction reached the state you asked for, or
-`BillPayPollTimeoutError`. That error now covers the case where the reads themselves were
-the problem, with `lastStatus` undefined and the last refusal as `cause`. Both mean the
-same thing to your order state — nobody knows yet — so both belong in the branch that
-hands the id to background reconciliation, not in one that reports a failure.
-
-`timeoutMs` bounds the whole wait, reads included, so the handoff fires when you said it
-would even if a single request hangs.
-
 ---
 
 ## Errors
@@ -289,19 +310,19 @@ Every failure throws a typed error extending `BillPayError`, which carries `code
 `httpStatus`, `requestId`, `retryAfter` and `details`. The API key never appears in a
 message, a property or a stack.
 
-| Class                     | Codes                                                                                        |
-| ------------------------- | -------------------------------------------------------------------------------------------- |
+| Class                     | Codes                                                                                                      |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------- |
 | `BillPayAuthError`        | `MISSING_ACCESS_TOKEN`, `INVALID_ACCESS_TOKEN`, `ERR_AUTH`, `IP_BLOCKED`, `IP_NOT_ALLOWED`, `API_DISABLED` |
-| `BillPayValidationError`  | `ERR_VALIDATION`, `INVALID_ACCOUNT`, `PAYLOAD_TOO_LARGE`                                     |
-| `BillPayConflictError`    | `DUPLICATED_REF`, `BILL_ALREADY_PAID`, `PAYMENT_IN_PROGRESS`                                 |
-| `BillPayUnavailableError` | `AUTH_UNAVAILABLE`, `SERVICE_UNAVAILABLE`, `PARTNER_UNAVAILABLE`                             |
-| `BillPayRateLimitError`   | `RATE_LIMIT_EXCEEDED`                                                                        |
-| `BillPayNotFoundError`    | `NOT_FOUND`                                                                                  |
-| `BillPayInternalError`    | `INTERNAL_ERROR`                                                                             |
-| `BillPayTimeoutError`     | request exceeded `timeoutMs`                                                                 |
-| `BillPayNetworkError`     | the request never reached the API                                                            |
-| `BillPayAbortError`       | your `AbortSignal` fired                                                                     |
-| `BillPayPollTimeoutError` | a polling helper gave up; read `lastStatus`                                                  |
+| `BillPayValidationError`  | `ERR_VALIDATION`, `INVALID_ACCOUNT`, `PAYLOAD_TOO_LARGE`                                                   |
+| `BillPayConflictError`    | `DUPLICATED_REF`, `BILL_ALREADY_PAID`, `PAYMENT_IN_PROGRESS`                                               |
+| `BillPayUnavailableError` | `AUTH_UNAVAILABLE`, `SERVICE_UNAVAILABLE`, `PARTNER_UNAVAILABLE`                                           |
+| `BillPayRateLimitError`   | `RATE_LIMIT_EXCEEDED`                                                                                      |
+| `BillPayNotFoundError`    | `NOT_FOUND`                                                                                                |
+| `BillPayInternalError`    | `INTERNAL_ERROR`                                                                                           |
+| `BillPayTimeoutError`     | request exceeded `timeoutMs`                                                                               |
+| `BillPayNetworkError`     | the request never reached the API                                                                          |
+| `BillPayAbortError`       | your `AbortSignal` fired                                                                                   |
+| `BillPayPollTimeoutError` | a polling helper gave up; read `lastStatus`                                                                |
 
 **`AUTH_UNAVAILABLE` is not an auth failure.** It means the API could not verify your
 key in time. Your key is fine — retry after `retryAfter` seconds. It is deliberately
@@ -436,7 +457,30 @@ which the SDK surfaces as a clean `BillPayNotFoundError` with `code: 'NOT_FOUND'
 `httpStatus: 404`. Keep the call behind the same `catch` you use for a missing receipt,
 and the day it ships your code starts returning a PDF instead.
 
-Three things about it are worth knowing before you wire it up:
+You can write that branch properly today, because the SDK tells the two kinds of `404`
+apart. Both arrive as `NOT_FOUND` and they mean opposite things — one is "this deployment
+has no such path", the other is "this transaction has no avis" — so
+`isEndpointMissing` reads the difference off whether the refusal ever reached the
+application:
+
+```ts
+try {
+  const avis = await client.bills.avis(transactionId);
+  return avis.bytes;
+} catch (err) {
+  if (err instanceof BillPayNotFoundError && err.isEndpointMissing) {
+    return null; // Not routed here yet. Offer the receipt, check again another day.
+  }
+  throw err; // A real refusal: not yours, not AADL, or no housing file resolved.
+}
+```
+
+Nothing in that block changes when the endpoint ships — `isEndpointMissing` simply stops
+being `true`, and the first line starts returning a PDF. The same property is available on
+every SDK error (`err.enveloped` is the raw fact behind it), so it also covers a proxy or a
+gateway refusing a call before the API sees it.
+
+Three things about the endpoint are worth knowing before you wire it up:
 
 - **It is not the receipt.** The receipt proves your payment went through; the avis is
   AADL's own statement of what the housing file owes. `Avis` and `Receipt` are
@@ -492,8 +536,8 @@ safelisted headers. Three the SDK reads are not on that list, and `Headers.get` 
 `null` for all three however plainly they sit on the wire. Nothing throws, but three
 values differ between Node and the browser, and it is worth knowing which:
 
-| Header                | Lost value                         | What happens instead                                            |
-| --------------------- | ---------------------------------- | --------------------------------------------------------------- |
+| Header                | Lost value                          | What happens instead                                            |
+| --------------------- | ----------------------------------- | --------------------------------------------------------------- |
 | `Content-Disposition` | `Receipt.filename`, `Avis.filename` | The SDK names the file `receipt-<id>.png` / `avis_<id>.pdf`     |
 | `X-Request-Id`        | `Receipt.requestId`, hook context   | `null` — errors keep theirs, which come from the body           |
 | `Retry-After`         | `BillPayError.retryAfter`           | `undefined`, and the transport uses its own exponential backoff |

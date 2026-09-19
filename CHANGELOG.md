@@ -33,12 +33,38 @@ started landing.
   message, and uses the canonical code where the status has exactly one (`404` →
   `NOT_FOUND`, `413`, `429`, `500`, `503`) or `HTTP_<status>` — a value the API can never
   send — where it does not.
-- **`ERR_AUTH`, `IP_NOT_ALLOWED` and `API_DISABLED` map to `BillPayAuthError`.** The two
-  403s were previously caught by the status fallback and arrived as
-  `BillPayConflictError`, which reads as "the work is already done" for what is really
-  "this key may not be used from here".
+- **`ERR_AUTH`, `IP_BLOCKED`, `IP_NOT_ALLOWED` and `API_DISABLED` map to
+  `BillPayAuthError`.** The three 403s were previously caught by the status fallback and
+  arrived as `BillPayConflictError`, which reads as "the work is already done" for what is
+  really "this key may not be used from here". `IP_BLOCKED` is the far end of the
+  twenty-attempt lockout, and the conflict branch's own advice — look the existing
+  transaction up with `getByRef` — is the one thing that cannot help when the gateway has
+  stopped answering your address.
 - **GETs are retried on `429`** as well as on 5xx and network failures, honouring
-  `Retry-After`. POSTs are still never retried, and no other 4xx is.
+  `Retry-After` up to a 30-second ceiling. The header is a number somebody else chooses:
+  uncapped, a single read could sleep for as long as it named, so a two-minute poll
+  meeting `Retry-After: 3600` spent an hour inside one request with the transaction
+  unwatched. POSTs are still never retried, and no other 4xx is.
+- **A failed poll no longer ends the wait.** `waitForReady` and `waitForTerminal` called
+  `get()` with no `catch`, so any transport error that survived the GET retries — a 5xx, a
+  `429`, a dropped socket — rejected the whole helper. Since `waitForTerminal` is only
+  reached after `pay` returned `PROCESSING`, roughly a second of upstream noise abandoned
+  a payment that was still in flight, with an error carrying neither `transactionId` nor
+  `lastStatus`. The pollers now ride transient failures out to the deadline and give up as
+  `BillPayPollTimeoutError`, which gained a `cause` for the last refusal; a refusal that
+  polling cannot fix (`404`, `401`, a malformed id) is still thrown straight through.
+- **`PollOptions.timeoutMs` bounds the reads too.** The deadline was only checked between
+  requests, so one hanging read or a long `Retry-After` could overrun the caller's budget
+  without limit and the handoff to background reconciliation fired late or not at all. The
+  deadline is now carried into every request as a signal, and it is still reported as
+  `BillPayPollTimeoutError` rather than as an abort — an abort is the caller's own
+  decision and means something different.
+- **`exports` gives each condition its own `types`.** The map was flat, so the ESM
+  `index.d.ts` was selected for `require` as well; because the package is `type: module`,
+  TypeScript then refused to let a CommonJS file import it (`TS1479` under
+  `module: node16`/`node18`) even though `dist/index.cjs` and a matching `index.d.cts`
+  were both being published. Runtime resolution was never affected, which is why nothing
+  noticed. Verified against CJS, ESM and bundler consumers.
 - **A blank `baseUrl` means "use the default".** `BILLPAY_BASE_URL=` is how a `.env` file
   says it, and it reaches the constructor as the empty string, which `??` took literally:
   every request then failed on `new URL('')` with a bare `TypeError: Invalid URL`, thrown
@@ -67,6 +93,14 @@ started landing.
   file, with arrears folded in and counted in `breakdown.unpaidPeriods`. There is no bill
   to pick.
 
+- **`Receipt.bytes` and `Avis.bytes` are `Uint8Array<ArrayBuffer>`, which raises the
+  minimum consumer TypeScript to 5.7.** From 5.7 on a bare `Uint8Array` means
+  `Uint8Array<ArrayBufferLike>`, which includes `SharedArrayBuffer` and so is not a
+  `BlobPart` — making `new Blob([receipt.bytes], { type: receipt.contentType })`, the only
+  way to show or save a receipt in a browser, a compile error in the consumer's own source
+  where `skipLibCheck` cannot hide it. The narrower type is also the accurate one: the
+  bytes come from `response.arrayBuffer()`.
+
 - **`ValidateResult` is now `{ username, apiKey: { key, isEnabled, type, allowedips, scope } }`.**
   The old `{ account: { id, status, currency }, key: { type } }` described a
   response the API has never sent — there is no `data.account` on the wire. The
@@ -87,11 +121,62 @@ started landing.
   you already have.
 - **`BillPayRateLimitError`** — `429` / `RATE_LIMIT_EXCEEDED`, with `isRetryable === true`.
   Previously a `429` arrived as the base `BillPayError`.
+- **`BillPayError.isEndpointMissing`**, and the `enveloped` flag behind it — whether a
+  refusal ever reached the application, or was turned away by the router in front of it.
+  A `404` from each is identical on the wire (`NOT_FOUND`, status `404`) and they mean
+  opposite things: "this deployment has no such path" versus "this transaction has no such
+  thing". It exists for `avis()`, which is documented and implemented but not yet routed,
+  so a caller can write the branch once today and have it keep working unchanged the day
+  the endpoint ships — `isEndpointMissing` simply stops being `true`. It also covers a
+  proxy or gateway refusing a call before the API sees it.
+- **`PollOptions.onPoll`** — called with every transaction `waitForReady` and
+  `waitForTerminal` read, including the one they return. The promise alone can only report
+  where a transaction ended up, so a payment that held on `UNKNOWN` for a minute and then
+  refunded was indistinguishable from one that refunded outright — and those two want very
+  different things said to the customer. A UI can now follow the states without
+  reimplementing the backoff, the deadline and the cancellation. Anything the hook throws
+  is swallowed, because a bad observer must not abandon a wait with money behind it.
 - Types: `ApiEnvironment` (`'SANDBOX' | 'PRODUCTION'`), `Avis` (deliberately the same shape
   as `Receipt`), `KeyErrorCode`, and `UnenvelopedError` for the router-level body.
 
+### Changed
+
+- **`receipt()`'s fallback filename carries an extension**, inferred from `Content-Type`:
+  `receipt-<id>.png` rather than `receipt-<id>`. That fallback is not the exotic path it
+  looks like — `Content-Disposition` is not CORS-safelisted and the API sends no
+  `Access-Control-Expose-Headers`, so in a browser the server's filename is unreadable and
+  this is the only name there is. A file saved without an extension is one neither Windows
+  nor macOS will open on a double-click. `Content-Type` survives the same filter, and an
+  unrecognised type still gets no extension rather than a guess. `avis()` already named
+  its fallback `avis_<id>.pdf` and is unchanged.
+
 ### Documentation
 
+- **What a browser cannot see.** The README's browser section used to assert parity with
+  no caveat. The code really is identical, but three response headers the SDK reads —
+  `Content-Disposition`, `X-Request-Id` and `Retry-After` — are not CORS-safelisted and
+  the API exposes none, so a browser reads `null` for all three however plainly they sit
+  on the wire. `Receipt.filename` falls back, `Receipt.requestId` is `null`, and
+  `BillPayError.retryAfter` is `undefined` with the transport's own backoff in its place.
+  Verified live with `Origin: http://localhost:5173`. Nothing throws; the table in the
+  README says which values differ.
+- **The landline format was wrong in the one place it was written precisely.**
+  `PhoneNumberAccount`'s TSDoc — which is what an editor shows on hover and what ships in
+  `dist/index.d.ts` — gave `^(0|\+213)[2-4][0-9]{7}$`, advertising an international form
+  the server refuses. Verified live: `'+21323456789'` answers `400 ERR_VALIDATION`,
+  `'023456789'` answers `200`. It now reads `^0[2-4][0-9]{7}$` and says so.
+- **`ref` uniqueness is per partner, not per (account, partner).** Three places said
+  otherwise, which is strictly weaker than what the server enforces and so reads as
+  permission: a ref keyed off a batch rather than a customer is legal under the old
+  wording and answers `403 DUPLICATED_REF` on the second customer of every run.
+- **`Transaction.completedAt` is not a terminality flag.** It was documented as "ISO
+  timestamp once terminal, otherwise `null`", which invites `if (txn.completedAt)` as a
+  settled check. The server sets it on `READY` and `UNKNOWN` too, and rewrites it when a
+  review resolves; only `PENDING` and `PROCESSING` are reliably `null`. Branch on
+  `status`.
+- The README's full-flow snippet is runnable. It had a top-level `return` — a
+  `SyntaxError` in ESM, `TS1108` under TypeScript — and called `writeFile` without
+  importing it. Both fixed, and the block now runs end to end against the sandbox.
 - The README no longer claims AADL is unavailable — it is `ACTIVE`, and `SEAAL` is the
   partner currently answering `503 PARTNER_UNAVAILABLE`. More to the point, it no longer
   asserts availability at all: read `client.partners()` at runtime.

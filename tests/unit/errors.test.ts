@@ -71,6 +71,7 @@ const MATRIX: Array<[SyncErrorCode, number, new (...a: never[]) => BillPayError]
  */
 const KEY_MATRIX: Array<[KeyErrorCode, number, new (...a: never[]) => BillPayError]> = [
   ['ERR_AUTH', 401, BillPayAuthError],
+  ['IP_BLOCKED', 403, BillPayAuthError],
   ['IP_NOT_ALLOWED', 403, BillPayAuthError],
   ['API_DISABLED', 403, BillPayAuthError],
   ['RATE_LIMIT_EXCEEDED', 429, BillPayRateLimitError],
@@ -104,14 +105,31 @@ describe('error mapping', () => {
   }
 
   it('reads a 403 about the key as an auth failure, not a conflict', async () => {
-    // Falling back on the status alone would file both of these under
+    // Falling back on the status alone would file all three of these under
     // BillPayConflictError, next to DUPLICATED_REF — and send the reader looking for a
     // transaction that clashed rather than at the key's IP allowlist or its on/off switch.
-    for (const code of ['IP_NOT_ALLOWED', 'API_DISABLED']) {
+    for (const code of ['IP_BLOCKED', 'IP_NOT_ALLOWED', 'API_DISABLED']) {
       const e = await thrown({ status: 403, json: err(code) });
       expect(e).toBeInstanceOf(BillPayAuthError);
       expect(e).not.toBeInstanceOf(BillPayConflictError);
     }
+  });
+
+  it('files the lockout code with the key, not with the conflicts', async () => {
+    // IP_BLOCKED is what twenty consecutive bad attempts finally buy: the address stops
+    // being served for about fifteen minutes. Sorting it by status alone lands it in
+    // BillPayConflictError, whose documented advice is to look the existing transaction
+    // up with getByRef — another request from an address that is answering nobody. The
+    // useful reaction is to page somebody about the credential instead.
+    const e = await thrown({
+      status: 403,
+      json: err('IP_BLOCKED', 'Your IP has been temporarily blocked'),
+    });
+
+    expect(e).toBeInstanceOf(BillPayAuthError);
+    expect(e).not.toBeInstanceOf(BillPayConflictError);
+    expect(e.code).toBe('IP_BLOCKED');
+    expect(e.isRetryable).toBe(false);
   });
 
   it('keeps an unknown code verbatim and falls back to the HTTP status', async () => {

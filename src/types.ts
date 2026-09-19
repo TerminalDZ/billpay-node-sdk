@@ -198,11 +198,7 @@ export type SyncErrorCode =
  * otherwise sort it into.
  */
 export type KeyErrorCode =
-  | 'ERR_AUTH'
-  | 'IP_BLOCKED'
-  | 'IP_NOT_ALLOWED'
-  | 'API_DISABLED'
-  | 'RATE_LIMIT_EXCEEDED';
+  'ERR_AUTH' | 'IP_BLOCKED' | 'IP_NOT_ALLOWED' | 'API_DISABLED' | 'RATE_LIMIT_EXCEEDED';
 
 /**
  * The four reasons that appear inside a transaction's `error`, and only when the
@@ -595,4 +591,21 @@ export interface PollOptions {
   maxIntervalMs?: number;
   /** Cancel the wait. Rejects with {@link BillPayAbortError}. */
   signal?: AbortSignal;
+  /**
+   * Called with every transaction the poll reads, including the one it finally returns.
+   *
+   * The promise these helpers return can only ever tell you where a transaction ended
+   * up. That is the wrong shape for anything with a screen attached: a payment that
+   * held on `UNKNOWN` for a minute and then refunded is, after the fact, indis-
+   * tinguishable from one that refunded immediately — and those two want very different
+   * things said to the customer.
+   *
+   * This hook is how a UI follows the transaction without reimplementing the backoff,
+   * the deadline and the cancellation, which is to say without testing a copy of them.
+   *
+   * It is called on the caller's behalf inside the poll loop, so keep it cheap and do
+   * not throw from it — an exception here would abandon a wait that may have money
+   * behind it. Anything thrown is swallowed for that reason.
+   */
+  onPoll?: (transaction: Transaction) => void;
 }

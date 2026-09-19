@@ -35,30 +35,106 @@ const discovering = () => {
   };
 };
 
+/**
+ * Every `.ts` under `src/`, at any depth, as a path relative to `src/`.
+ *
+ * Recursive on purpose. A flat `readdirSync` filtered by `.endsWith('.ts')` silently
+ * drops directory entries, so the day anything moves to `src/internal/` the guard below
+ * stops reading it — and a plain one-line `node:` import there sails through a green
+ * suite. Walking is the only version of "the whole module graph" that stays true.
+ */
+const sourceFiles = (dir: URL, prefix = ''): string[] =>
+  readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
+    entry.isDirectory()
+      ? sourceFiles(new URL(`${entry.name}/`, dir), `${prefix}${entry.name}/`)
+      : entry.name.endsWith('.ts')
+        ? [`${prefix}${entry.name}`]
+        : [],
+  );
+
 describe('browser safety', () => {
+  const src = new URL('../../src/', import.meta.url);
+
   it('imports nothing from node: anywhere in the module graph', () => {
     // A bare `node:` specifier is a bundler error long before it is a runtime one: the
     // Vue app that imports this package simply fails to build. `ref.ts` is the file that
     // wants one — a UUID — so it is the one most likely to regress, but the guarantee is
     // about the whole graph, which is why every source file is read.
-    const src = new URL('../../src/', import.meta.url);
-    const files = readdirSync(src).filter((f) => f.endsWith('.ts'));
+    //
+    // The match anchors on the specifier rather than on the `import` keyword. Anchoring
+    // on the keyword means the pattern has to reach across whatever sits between the two,
+    // and a named list long enough for Prettier to break over several lines puts a
+    // newline there — so the one formatting the repo already uses for its longer imports
+    // is the one form the guard would miss.
+    const files = sourceFiles(src);
     expect(files.length).toBeGreaterThanOrEqual(7);
 
     const offenders = files.filter((f) =>
-      /(?:^|\s)(?:import|export)[^\n;]*?['"]node:/.test(readFileSync(new URL(f, src), 'utf8')),
+      /['"]node:[^'"]*['"]/.test(readFileSync(new URL(f, src), 'utf8')),
     );
     expect(offenders).toEqual([]);
   });
 
-  it('never calls require either, which a CJS build would satisfy and a browser would not', () => {
-    const src = new URL('../../src/', import.meta.url);
-    const files = readdirSync(src).filter((f) => f.endsWith('.ts'));
+  it('catches a node: import however it is written', () => {
+    // The guard is the only thing standing between a Node builtin and a broken browser
+    // bundle, and nothing else in the repo looks: eslint has no import restriction, and
+    // tsconfig sets `types: ["node"]` so the compiler is perfectly happy. So the pattern
+    // itself is worth a test — including the multi-line form Prettier produces once a
+    // named list passes 100 columns.
+    const nodeImport = /['"]node:[^'"]*['"]/;
+    const forms = [
+      `import { randomUUID } from 'node:crypto';`,
+      `import type { Buffer } from 'node:buffer';`,
+      `import 'node:crypto';`,
+      `import crypto from 'node:crypto';`,
+      `import * as crypto from 'node:crypto';`,
+      `export { randomUUID } from 'node:crypto';`,
+      `const { randomUUID } = await import('node:crypto');`,
+      `import {\n  randomUUID,\n  createHash,\n} from 'node:crypto';`,
+      `import type {\n  Buffer,\n} from 'node:buffer';`,
+      `export {\n  randomUUID,\n} from 'node:crypto';`,
+    ];
 
-    const offenders = files.filter((f) =>
+    for (const form of forms) expect(nodeImport.test(form)).toBe(true);
+    // And it does not fire on prose that merely mentions one, which is how the comment
+    // above and half of ref.ts's own documentation are written.
+    expect(nodeImport.test('// never import node:crypto here')).toBe(false);
+  });
+
+  it('never calls require either, which a CJS build would satisfy and a browser would not', () => {
+    const offenders = sourceFiles(src).filter((f) =>
       /require\s*\(\s*['"]/.test(readFileSync(new URL(f, src), 'utf8')),
     );
     expect(offenders).toEqual([]);
+  });
+
+  it('reads files below src/, not just the ones beside index.ts', () => {
+    // The floor above only catches files moving *out* of src/. A module added under a
+    // new subdirectory leaves the count where it was, so the walk is what has to be
+    // asserted — and it is asserted against the one subdirectory that exists: none.
+    const files = sourceFiles(src);
+    expect(files).toContain('index.ts');
+    expect(files.every((f) => f.endsWith('.ts'))).toBe(true);
+    expect(sourceFiles(new URL('../../tests/', import.meta.url))).toContain('unit/helpers.ts');
+  });
+});
+
+describe('packaging', () => {
+  const pkg = JSON.parse(
+    readFileSync(new URL('../../package.json', import.meta.url), 'utf8'),
+  ) as Record<string, unknown>;
+
+  it('points each condition at declarations of its own module format', () => {
+    // A flat `{ types, import, require }` map hands the single ESM `.d.ts` to the
+    // `require` path as well, and because the package is `type: module` TypeScript then
+    // refuses to let a CommonJS file import it — `TS1479`, under `module: node16` — even
+    // though `dist/index.cjs` is sitting right there and works. tsup already emits
+    // `index.d.cts`; it just has to be reachable. Runtime resolution is unaffected, which
+    // is exactly why nothing else would notice.
+    expect((pkg.exports as Record<string, unknown>)['.']).toEqual({
+      import: { types: './dist/index.d.ts', default: './dist/index.js' },
+      require: { types: './dist/index.d.cts', default: './dist/index.cjs' },
+    });
   });
 });
 

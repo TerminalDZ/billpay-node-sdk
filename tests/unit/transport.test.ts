@@ -406,6 +406,44 @@ describe('retry policy', () => {
     expect(gaps(s.calls.map((x) => x.at))).toEqual([2_000]);
   });
 
+  it('caps an outsized Retry-After rather than sleeping for as long as it asks', async () => {
+    // `Retry-After` is a number somebody else chooses. The origin sends 5, but a
+    // rate-limit rule at the edge can name minutes, and a transport that sleeps through
+    // that hands the caller's own deadline to a stranger — a two-minute poll spending an
+    // hour inside one read, with the transaction unwatched for all of it.
+    const { c, s } = mk(
+      [
+        { status: 429, json: err('RATE_LIMIT_EXCEEDED'), headers: { 'retry-after': '3600' } },
+        { json: ok([]) },
+      ],
+      { retries: 1 },
+    );
+
+    const p = settled(c.bills.list());
+    await vi.advanceTimersByTimeAsync(600_000);
+    await p;
+
+    expect(gaps(s.calls.map((x) => x.at))).toEqual([30_000]);
+  });
+
+  it('still obeys a Retry-After that is under the ceiling, to the millisecond', async () => {
+    // The cap is a ceiling, not a replacement: the documented value is 5 seconds and it
+    // has to survive untouched, or the server loses the only lever it has on us.
+    const { c, s } = mk(
+      [
+        { status: 503, json: err('AUTH_UNAVAILABLE'), headers: { 'retry-after': '5' } },
+        { json: ok([]) },
+      ],
+      { retries: 1 },
+    );
+
+    const p = settled(c.bills.list());
+    await vi.advanceTimersByTimeAsync(60_000);
+    await p;
+
+    expect(gaps(s.calls.map((x) => x.at))).toEqual([5_000]);
+  });
+
   it('falls back to its own backoff when the server sends no Retry-After', async () => {
     const { c, s } = mk([{ status: 429, json: err('RATE_LIMIT_EXCEEDED') }, { json: ok([]) }], {
       retries: 1,

@@ -60,6 +60,25 @@ const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
     signal?.addEventListener('abort', onAbort, { once: true });
   });
 
+/**
+ * Hands a transaction to the caller's `onPoll`, and refuses to let that call break the
+ * wait.
+ *
+ * A poll loop can have a payment behind it, so a bug in an observer — a Vue component
+ * that unmounted, a logger with a bad format string — must not be able to abandon it.
+ * The exception is dropped rather than surfaced because there is no honest way to
+ * report it: it did not come from the API, and raising it would make a healthy payment
+ * look like a failed one.
+ */
+const notify = (hook: PollOptions['onPoll'], transaction: Transaction): void => {
+  if (!hook) return;
+  try {
+    hook(transaction);
+  } catch {
+    /* Deliberately swallowed — see above. */
+  }
+};
+
 export class BillsResource {
   constructor(private readonly transport: Transport) {}
 
@@ -216,7 +235,23 @@ export class BillsResource {
    * and implemented here against that contract, but today the server answers a
    * router-level miss, which the transport surfaces as `BillPayNotFoundError`. Expect
    * that, keep the call behind the same `catch` you use for a missing receipt, and the
-   * day it ships your code will start returning a PDF instead.
+   * day it ships your code will start returning a PDF instead — with no edit on your
+   * side, which is the point of shipping it now.
+   *
+   * Write that branch today with {@link BillPayError.isEndpointMissing}, which tells the
+   * two kinds of `404` apart. Both arrive as `NOT_FOUND`, and they mean opposite things:
+   *
+   * ```ts
+   * try {
+   *   const avis = await client.bills.avis(transactionId);
+   *   return avis.bytes;
+   * } catch (err) {
+   *   if (err instanceof BillPayNotFoundError && err.isEndpointMissing) {
+   *     return null; // Not routed here yet. Offer the receipt, check again another day.
+   *   }
+   *   throw err; // A real refusal: not yours, not AADL, or no housing file resolved.
+   * }
+   * ```
    *
    * **AADL only.** Every other partner answers `404` — read `partner` on the
    * transaction and offer the download only when it is `AADL`. For everyone else
@@ -333,6 +368,7 @@ export class BillsResource {
 
         try {
           last = await this.get(transactionId, ctl.signal);
+          notify(opts.onPoll, last);
           if (done(last)) return last;
         } catch (e) {
           // `isRetryable` is already the SDK's answer to "would the same request
