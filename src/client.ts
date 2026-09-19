@@ -5,7 +5,13 @@
 import { BillsResource } from './bills.js';
 import { BillPayValidationError } from './errors.js';
 import { Transport } from './http.js';
-import type { ApiEnvironment, BillPayClientOptions, PartnersMap, ValidateResult } from './types.js';
+import type {
+  ApiEnvironment,
+  BillPayClientOptions,
+  FetchLike,
+  PartnersMap,
+  ValidateResult,
+} from './types.js';
 
 /**
  * The API, for both environments.
@@ -75,13 +81,18 @@ export class BillPayClient {
       throw new BillPayValidationError('apiKey is required.', { code: 'ERR_VALIDATION' });
     }
 
-    const fetchImpl = options.fetch ?? globalThis.fetch;
-    if (typeof fetchImpl !== 'function') {
+    if (options.fetch === undefined && typeof globalThis.fetch !== 'function') {
       throw new BillPayValidationError(
         'No fetch implementation available. Use Node 18+, or pass one via the `fetch` option.',
         { code: 'ERR_VALIDATION' },
       );
     }
+
+    // The transport calls this as a method on its own config object, so an unbound
+    // `globalThis.fetch` arrives with the wrong `this`. Node does not care; a browser
+    // throws `TypeError: Failed to execute 'fetch' on 'Window': Illegal invocation`,
+    // which turns every call from a page into a BillPayNetworkError. Bind it here.
+    const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
 
     this.transport = new Transport({
       apiKey: options.apiKey,

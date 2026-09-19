@@ -193,3 +193,59 @@ describe('client surface', () => {
     expect(c.bills).toBeInstanceOf(BillsResource);
   });
 });
+
+/**
+ * The default `fetch` — the one nobody passes, and therefore the one every browser app
+ * uses.
+ *
+ * The transport calls it as a method on its own config object. Node's `fetch` is an
+ * ordinary function and does not care what `this` is, so this whole class of bug is
+ * invisible to a suite that only ever runs in Node — which is how an unbound
+ * `globalThis.fetch` shipped and turned every call from a page into
+ * `TypeError: Failed to execute 'fetch' on 'Window': Illegal invocation`, surfacing as a
+ * `BillPayNetworkError` with nothing in it to suggest the cause.
+ *
+ * So the browser's contract is installed here instead: a `fetch` that refuses to run
+ * detached from its global. Nothing else in the suite can catch this.
+ */
+describe('the default fetch', () => {
+  it('survives being called detached from globalThis, as a browser requires', async () => {
+    const realFetch = globalThis.fetch;
+    const calls: string[] = [];
+
+    globalThis.fetch = function thisSensitiveFetch(this: unknown, url: string): Promise<Response> {
+      if (this !== globalThis) {
+        throw new TypeError("Failed to execute 'fetch' on 'Window': Illegal invocation");
+      }
+      calls.push(url);
+      return Promise.resolve(
+        new Response(JSON.stringify(okBare(VALIDATE_DATA)), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+    } as unknown as typeof globalThis.fetch;
+
+    try {
+      const c = new BillPayClient({ apiKey: 'sk_test', baseUrl: 'http://api.test', retries: 0 });
+      const result = await c.validate();
+
+      expect(result.apiKey.type).toBe('SANDBOX');
+      expect(calls).toEqual(['http://api.test/v3/validate']);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it('still refuses to construct when there is no fetch to bind', () => {
+    const realFetch = globalThis.fetch;
+    // @ts-expect-error — modelling a runtime older than Node 18, which has no fetch.
+    delete globalThis.fetch;
+
+    try {
+      expect(() => new BillPayClient({ apiKey: 'sk_test' })).toThrow(/No fetch implementation/);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+});
