@@ -15,11 +15,12 @@ started landing.
 
 - **The default `fetch` is bound to `globalThis`.** The transport calls it as a method on
   its own config object, so an unbound `globalThis.fetch` arrived with the wrong `this`.
-  Node's `fetch` does not care; a browser throws `TypeError: Failed to execute 'fetch' on
-  'Window': Illegal invocation`, which turned **every** call from a page into a
-  `BillPayNetworkError` carrying nothing that pointed at the cause. Invisible to a suite
-  that only runs in Node, so the regression test installs a `this`-sensitive `fetch` and
-  holds the SDK to the browser's contract.
+  Node's `fetch` does not care. A browser throws an `Illegal invocation` `TypeError`, so
+  **every** call from a page became a `BillPayNetworkError` carrying nothing that pointed
+  at the cause. This release dropped `node:crypto` precisely so a browser could import the
+  SDK; this would have stopped it working the moment one did. Invisible to a suite that
+  only runs in Node, so the regression test installs a `this`-sensitive `fetch` and holds
+  the SDK to the browser's contract.
 - **`DEFAULT_BASE_URL` is now `https://api.oneclickdz.com`** (was
   `https://billapi.oneclickdz.com`). The old host rejects every key with
   `401 INVALID_ACCESS_TOKEN`; it was never a valid default. One host serves both
