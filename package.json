@@ -6,11 +6,11 @@
   "author": "OneClickDz",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/terminaldz/billpay-node-sdk.git"
+    "url": "git+https://github.com/TerminalDZ/billpay-node-sdk.git"
   },
-  "homepage": "https://github.com/terminaldz/billpay-node-sdk#readme",
+  "homepage": "https://github.com/TerminalDZ/billpay-node-sdk#readme",
   "bugs": {
-    "url": "https://github.com/terminaldz/billpay-node-sdk/issues"
+    "url": "https://github.com/TerminalDZ/billpay-node-sdk/issues"
   },
   "keywords": [
     "oneclickdz",
