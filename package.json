@@ -1,6 +1,6 @@
 {
   "name": "@terminaldz/billpay-sdk",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Official Node.js/TypeScript SDK for the OneClickDz Bill Payment API (/v3).",
   "license": "MIT",
   "author": "OneClickDz",
@@ -28,9 +28,14 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
     },
     "./package.json": "./package.json"
   },
@@ -49,7 +54,9 @@
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "test": "vitest run tests/unit",
+    "test:all": "npm run lint && npm run typecheck && npm run test",
     "test:integration": "vitest run tests/integration",
     "test:watch": "vitest",
     "example": "node --experimental-strip-types examples/pay-a-bill.ts",
@@ -61,7 +68,7 @@
     "eslint": "^9.13.0",
     "prettier": "^3.3.3",
     "tsup": "^8.3.0",
-    "typescript": "^5.6.3",
+    "typescript": "^5.7.0",
     "typescript-eslint": "^8.11.0",
     "vitest": "^4.1.11"
   }

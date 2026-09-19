@@ -2,6 +2,9 @@
  * `@terminaldz/billpay-sdk` — the official Node.js SDK for the OneClickDz Bill
  * Payment API (`/v3`).
  *
+ * Zero runtime dependencies, and no `node:` imports anywhere in the graph, so the same
+ * build serves Node 18+ and the browser.
+ *
  * @see https://docs.oneclickdz.com
  */
 
@@ -14,6 +17,7 @@ export {
   BillPayValidationError,
   BillPayConflictError,
   BillPayUnavailableError,
+  BillPayRateLimitError,
   BillPayNotFoundError,
   BillPayInternalError,
   BillPayTimeoutError,
@@ -24,12 +28,14 @@ export {
 
 export { newRef, payRefFor, isValidRef, REF_MAX_LENGTH } from './ref.js';
 
-export { PARTNERS, TERMINAL_STATUSES, isTerminal } from './types.js';
+export { PARTNERS, TERMINAL_STATUSES, isTerminal, environmentOf } from './types.js';
 
 export type {
   AadlAccount,
   AccountIdentifier,
   AdeInvoiceAccount,
+  ApiEnvironment,
+  Avis,
   Bill,
   BillBreakdown,
   BillPayClientOptions,
@@ -41,6 +47,7 @@ export type {
   FetchLike,
   GetByRefParams,
   HookContext,
+  KeyErrorCode,
   ListParams,
   Partner,
   PartnersMap,
@@ -61,5 +68,6 @@ export type {
   Transaction,
   TransactionList,
   TransactionStatus,
+  UnenvelopedError,
   ValidateResult,
 } from './types.js';

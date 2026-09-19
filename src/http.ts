@@ -6,6 +6,12 @@
  * on reuse rather than replayed — so a blind retry after a timeout either duplicates
  * work or fails with `DUPLICATED_REF`, and neither tells you what happened to the
  * first attempt. `bills.getByRef(ref)` does.
+ *
+ * The decoding rule matters nearly as much. Not every refusal comes from the
+ * application: a path the router does not know, or a proxy in front of the API, answers
+ * with something that is not the house envelope. Those are turned into the same typed
+ * errors as everything else rather than being reported as a malformed response, because
+ * "not found" is what happened and "I could not read the body" is not.
  */
 
 import {
@@ -14,8 +20,15 @@ import {
   BillPayNetworkError,
   BillPayTimeoutError,
   errorFromEnvelope,
+  errorFromHttpStatus,
 } from './errors.js';
-import type { ErrorEnvelope, FetchLike, HookContext, SuccessEnvelope } from './types.js';
+import type {
+  ErrorEnvelope,
+  FetchLike,
+  HookContext,
+  SuccessEnvelope,
+  UnenvelopedError,
+} from './types.js';
 
 /** Resolved transport configuration. */
 export interface TransportConfig {
@@ -36,13 +49,18 @@ export interface RequestSpec {
   body?: unknown;
   /** Caller cancellation, composed with the per-request timeout. */
   signal?: AbortSignal;
-  /** Set for the receipt endpoint, which returns bytes rather than an envelope. */
+  /** Set for the download endpoints, which return bytes rather than an envelope. */
   raw?: boolean;
 }
 
-/** A raw (non-envelope) response, used by the receipt endpoint. */
+/** A raw (non-envelope) response, used by the receipt and avis endpoints. */
 export interface RawResponse {
-  bytes: Uint8Array;
+  /**
+   * The buffer type is spelled out rather than left to default: a bare `Uint8Array` is
+   * `Uint8Array<ArrayBufferLike>` from TypeScript 5.7 on, which no longer satisfies
+   * `BlobPart`, and these bytes reach a browser caller as the argument to a `Blob`.
+   */
+  bytes: Uint8Array<ArrayBuffer>;
   headers: Headers;
   status: number;
 }
@@ -61,7 +79,13 @@ const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
     signal?.addEventListener('abort', onAbort, { once: true });
   });
 
-/** `Retry-After` in seconds. The API sends `5`; the HTTP-date form is not used here. */
+/**
+ * `Retry-After` in seconds. The API sends `5`; the HTTP-date form is not used here.
+ *
+ * Like the other two headers this transport reads, it is invisible to a browser — not
+ * safelisted, and not exposed — so in one the answer is always `undefined` and the
+ * exponential fallback in {@link backoffMs} is what actually runs.
+ */
 const parseRetryAfter = (headers: Headers): number | undefined => {
   const raw = headers.get('retry-after');
   if (!raw) return undefined;
@@ -69,12 +93,43 @@ const parseRetryAfter = (headers: Headers): number | undefined => {
   return Number.isFinite(secs) && secs >= 0 ? secs : undefined;
 };
 
-/** Filename from `Content-Disposition`, unquoted. */
+/**
+ * Filename from `Content-Disposition`, unquoted.
+ *
+ * Returns `undefined` far more often than the header's presence on the wire suggests:
+ * `Content-Disposition` is not a CORS-safelisted response header and the API sends no
+ * `Access-Control-Expose-Headers`, so in a browser this reads `null` from a response that
+ * demonstrably carries the header. The download helpers therefore need a fallback that is
+ * good enough to save under, not merely good enough to log.
+ */
 export const filenameFromDisposition = (headers: Headers): string | undefined => {
   const cd = headers.get('content-disposition');
   if (!cd) return undefined;
   const m = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(cd);
   return m?.[1];
+};
+
+/** The media types these two endpoints are documented to send, and what to call them. */
+const EXTENSION_BY_TYPE: Readonly<Record<string, string>> = {
+  'application/pdf': '.pdf',
+  'image/png': '.png',
+  'image/jpeg': '.jpg',
+  'image/jpg': '.jpg',
+};
+
+/**
+ * The extension that belongs with a `Content-Type`, or `''` when there is no honest
+ * answer.
+ *
+ * `Content-Type` is safelisted, so it survives the CORS filter that hides
+ * `Content-Disposition` — which makes it the only thing left to name a downloaded file
+ * by in a browser. An extension-less file is not a cosmetic problem: Windows and macOS
+ * both refuse to open one on a double-click, so a receipt saved that way looks broken to
+ * the tenant who was handed it. An unrecognised type gets nothing rather than a guess.
+ */
+export const extensionForContentType = (contentType: string | null): string => {
+  const base = (contentType ?? '').split(';')[0]?.trim().toLowerCase() ?? '';
+  return EXTENSION_BY_TYPE[base] ?? '';
 };
 
 const buildUrl = (baseUrl: string, path: string, query?: RequestSpec['query']): string => {
@@ -85,9 +140,30 @@ const buildUrl = (baseUrl: string, path: string, query?: RequestSpec['query']): 
   return url.toString();
 };
 
+/**
+ * The longest this transport will sleep because a server asked it to.
+ *
+ * `Retry-After` is a number chosen by somebody else, and obeying it without a ceiling
+ * hands them control of how long the caller's own deadline means anything: a poll with a
+ * two-minute budget that meets `Retry-After: 3600` sleeps for two hours inside a single
+ * read. The origin sends `5`; Cloudflare sits in front of it and a rate-limit rule there
+ * can name a mitigation window in minutes. Thirty seconds is far above anything the API
+ * documents and far below the point at which the wait stops being a backoff.
+ */
+export const MAX_RETRY_AFTER_MS = 30_000;
+
 /** Backoff for GET retries: 300ms, 600ms, 1200ms… capped, unless `Retry-After` says otherwise. */
 const backoffMs = (attempt: number, retryAfter?: number): number =>
-  retryAfter !== undefined ? retryAfter * 1000 : Math.min(300 * 2 ** attempt, 5000);
+  retryAfter !== undefined
+    ? Math.min(retryAfter * 1000, MAX_RETRY_AFTER_MS)
+    : Math.min(300 * 2 ** attempt, 5000);
+
+/**
+ * Worth another attempt on a GET: the server is struggling or throttling us, and the
+ * same read will give the same answer once it stops. Every other 4xx is the caller's to
+ * fix and retrying it only burns the rate limit.
+ */
+const isRetryableStatus = (status: number): boolean => status >= 500 || status === 429;
 
 export class Transport {
   constructor(private readonly cfg: TransportConfig) {}
@@ -96,11 +172,22 @@ export class Transport {
   async request<T>(spec: RequestSpec): Promise<{ data: T; envelope: SuccessEnvelope<T> }> {
     const res = await this.send(spec);
     const requestId = res.headers.get('x-request-id');
+    const text = new TextDecoder().decode(res.bytes);
 
     let parsed: unknown;
     try {
-      parsed = JSON.parse(new TextDecoder().decode(res.bytes));
+      parsed = JSON.parse(text);
     } catch (cause) {
+      // A body we cannot read on a failing status is still that failure — report the
+      // status, not our disappointment with the bytes.
+      if (res.status >= 400) {
+        throw errorFromHttpStatus({
+          message: `The API returned HTTP ${res.status} with a body that was not JSON.`,
+          httpStatus: res.status,
+          requestId,
+          retryAfter: parseRetryAfter(res.headers),
+        });
+      }
       throw new BillPayError('The API returned a response that was not valid JSON.', {
         code: 'INVALID_RESPONSE',
         httpStatus: res.status,
@@ -109,7 +196,7 @@ export class Transport {
       });
     }
 
-    if (this.isErrorEnvelope(parsed)) {
+    if (isErrorEnvelope(parsed)) {
       throw errorFromEnvelope({
         code: parsed.error.code,
         message: parsed.error.message,
@@ -120,7 +207,8 @@ export class Transport {
       });
     }
 
-    if (!this.isSuccessEnvelope<T>(parsed)) {
+    if (!isSuccessEnvelope<T>(parsed)) {
+      if (res.status >= 400) throw this.unenvelopedError(parsed, res, requestId);
       throw new BillPayError('The API returned an unrecognised response envelope.', {
         code: 'INVALID_RESPONSE',
         httpStatus: res.status,
@@ -131,38 +219,71 @@ export class Transport {
     return { data: parsed.data, envelope: parsed };
   }
 
-  /** Perform a request expecting raw bytes; errors still arrive as an envelope. */
+  /**
+   * Perform a request expecting raw bytes.
+   *
+   * A download that fails answers with JSON, so anything non-2xx is decoded and thrown
+   * here rather than handed back as a `Uint8Array` the caller would happily write to
+   * disk as a PDF.
+   */
   async requestRaw(spec: RequestSpec): Promise<RawResponse> {
     const res = await this.send({ ...spec, raw: true });
-    const contentType = res.headers.get('content-type') ?? '';
+    if (res.status < 400) return res;
 
-    // A failed receipt download still returns the house JSON envelope.
-    if (contentType.includes('application/json')) {
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(new TextDecoder().decode(res.bytes));
-      } catch {
-        parsed = null;
-      }
-      if (this.isErrorEnvelope(parsed)) {
-        throw errorFromEnvelope({
-          code: parsed.error.code,
-          message: parsed.error.message,
-          httpStatus: res.status,
-          requestId: parsed.requestId ?? res.headers.get('x-request-id'),
-          retryAfter: parseRetryAfter(res.headers),
-          details: parsed.error.details,
-        });
-      }
+    const requestId = res.headers.get('x-request-id');
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(new TextDecoder().decode(res.bytes));
+    } catch {
+      parsed = undefined;
     }
-    return res;
+
+    if (isErrorEnvelope(parsed)) {
+      throw errorFromEnvelope({
+        code: parsed.error.code,
+        message: parsed.error.message,
+        httpStatus: res.status,
+        requestId: parsed.requestId ?? requestId,
+        retryAfter: parseRetryAfter(res.headers),
+        details: parsed.error.details,
+      });
+    }
+
+    throw this.unenvelopedError(parsed, res, requestId);
   }
 
   /**
-   * Send with timeout and — for GET only — retries on network errors and 5xx.
+   * Turn a refusal that carries no house envelope into the same typed error as one that
+   * does, keeping whatever sentence the server did send.
+   *
+   * Fastify's router miss is `{ message, error, statusCode }`; a proxy may send prose or
+   * nothing at all. `GET …/{id}/avis` is documented but not yet routed in the live
+   * deployment, so today it is the ordinary way to meet this path.
+   */
+  private unenvelopedError(
+    parsed: unknown,
+    res: RawResponse,
+    requestId: string | null,
+  ): BillPayError {
+    const body = (typeof parsed === 'object' && parsed !== null ? parsed : {}) as UnenvelopedError;
+    const message =
+      (typeof body.message === 'string' && body.message) ||
+      (typeof body.error === 'string' && body.error) ||
+      `The API answered HTTP ${res.status}.`;
+
+    return errorFromHttpStatus({
+      message,
+      httpStatus: res.status,
+      requestId,
+      retryAfter: parseRetryAfter(res.headers),
+    });
+  }
+
+  /**
+   * Send with timeout and — for GET only — retries on network errors, 5xx and 429.
    *
    * A non-2xx response is returned rather than thrown; decoding turns it into a typed
-   * error, because the envelope carries the code and the `requestId`.
+   * error, because the body carries the code and the `requestId`.
    */
   private async send(spec: RequestSpec): Promise<RawResponse> {
     const url = buildUrl(this.cfg.baseUrl, spec.path, spec.query);
@@ -203,9 +324,8 @@ export class Transport {
           durationMs: Date.now() - started,
         });
 
-        // Retry 5xx on GET only; 4xx is the caller's to fix and never retried.
         const isLast = attempt === attempts - 1;
-        if (res.status >= 500 && !isLast) {
+        if (isRetryableStatus(res.status) && !isLast) {
           await sleep(backoffMs(attempt, parseRetryAfter(res.headers)), spec.signal);
           continue;
         }
@@ -241,22 +361,20 @@ export class Transport {
     /* c8 ignore next 2 — the loop always returns or throws. */
     throw lastError ?? new BillPayNetworkError('The request failed.');
   }
-
-  private isErrorEnvelope(v: unknown): v is ErrorEnvelope {
-    return (
-      typeof v === 'object' &&
-      v !== null &&
-      (v as ErrorEnvelope).success === false &&
-      typeof (v as ErrorEnvelope).error?.code === 'string'
-    );
-  }
-
-  private isSuccessEnvelope<T>(v: unknown): v is SuccessEnvelope<T> {
-    return (
-      typeof v === 'object' &&
-      v !== null &&
-      (v as SuccessEnvelope<T>).success === true &&
-      'data' in (v as Record<string, unknown>)
-    );
-  }
 }
+
+/**
+ * The house error envelope. `success: false` plus a code is the whole test — a body
+ * without them came from somewhere other than the application.
+ */
+const isErrorEnvelope = (v: unknown): v is ErrorEnvelope =>
+  typeof v === 'object' &&
+  v !== null &&
+  (v as ErrorEnvelope).success === false &&
+  typeof (v as ErrorEnvelope).error?.code === 'string';
+
+const isSuccessEnvelope = <T>(v: unknown): v is SuccessEnvelope<T> =>
+  typeof v === 'object' &&
+  v !== null &&
+  (v as SuccessEnvelope<T>).success === true &&
+  'data' in (v as Record<string, unknown>);

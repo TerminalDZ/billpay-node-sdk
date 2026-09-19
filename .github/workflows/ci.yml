@@ -10,7 +10,7 @@ jobs:
     # vitest 4 imports `styleText` from node:util and so needs Node 20+. That is a
     # constraint on the test runner, not on the package: the published SDK supports
     # Node 18, which the `compat` job below proves against the built artifact.
-    name: lint · typecheck · test · build
+    name: lint · format · typecheck · test · build
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -29,13 +29,21 @@ jobs:
 
       - run: npm run lint
 
+      # Prettier owns every file the repo does not ignore, including the markdown.
+      # Without this step the only thing keeping formatting consistent is whether a
+      # contributor remembered to run `npm run format`, and it drifts the moment one
+      # does not.
+      - run: npm run format:check
+
       - run: npm run typecheck
 
-      # Unit only. The integration suite in tests/integration talks to the local
-      # BillPayManager stack on http://localhost:3100, which does not exist on a CI
-      # runner — it is run by hand against a stack started with
-      # `billPayManager/scripts/run-local.ps1 up`. It skips rather than fails when the
-      # stack is absent, but there is no value in running it here.
+      # Unit only. The integration suite in tests/integration talks to the live
+      # sandbox at https://api.oneclickdz.com, and every run discovers and pays real
+      # sandbox transactions against one shared, published key. It skips rather than
+      # fails when the API is unreachable, so running it here would be safe — but a
+      # matrix of two Node versions on every push would spend that key's rate limit on
+      # a result the suite already proves when it is run by hand. Run it with
+      # `npm run test:integration`.
       - run: npm test
 
       - run: npm run build

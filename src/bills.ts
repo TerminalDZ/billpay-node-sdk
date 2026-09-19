@@ -2,11 +2,17 @@
  * The `bills` resource: discover, pay, look up, download, and wait.
  */
 
-import { BillPayAbortError, BillPayPollTimeoutError, BillPayValidationError } from './errors.js';
-import { filenameFromDisposition, type Transport } from './http.js';
+import {
+  BillPayAbortError,
+  BillPayError,
+  BillPayPollTimeoutError,
+  BillPayValidationError,
+} from './errors.js';
+import { extensionForContentType, filenameFromDisposition, type Transport } from './http.js';
 import { isValidRef, REF_MAX_LENGTH } from './ref.js';
 import {
   isTerminal,
+  type Avis,
   type DiscoverAck,
   type DiscoverParams,
   type GetByRefParams,
@@ -79,8 +85,11 @@ export class BillsResource {
   /**
    * Pay one discovered bill. `POST /v3/bills/pay`.
    *
-   * `params.ref` must **differ from the discovery ref** — that transaction is still
-   * live, so reusing its ref answers `403 DUPLICATED_REF`. Use `payRefFor(discoveryRef)`.
+   * Give the payment its own `ref` — `payRefFor(discoveryRef)` derives one. The docs
+   * describe that as mandatory and promise `403 DUPLICATED_REF` for the discovery ref;
+   * the live deployment in fact accepts it. Treat the distinct ref as the convention it
+   * is: cheap, unambiguous in your own logs, and already correct if the server starts
+   * enforcing what it documents.
    *
    * The ref you pass is validated and then discarded. The returned `ref` is the
    * *discovery* ref, and that is the only one `getByRef` will ever resolve.
@@ -105,10 +114,11 @@ export class BillsResource {
    *
    * Two fields are **not** populated here, because the server projects them away:
    * `bills` always comes back as `[]`, and `error` is absent or defaulted on failed
-   * rows. Use {@link get} for either. This is a server-side quirk, not an SDK one —
-   * see the README's "Known drift" section.
+   * rows. Use {@link get} for either. This is a server-side quirk, not an SDK one.
    *
-   * Counts come from `meta`, not the body: `data` is a bare array.
+   * Counts come from `meta`, not the body: `data` is a bare array. `meta` itself is
+   * optional across the API, so each count falls back to what this page can prove —
+   * a `total` derived that way is a floor, not the real total.
    */
   async list(params: ListParams = {}, signal?: AbortSignal): Promise<TransactionList> {
     const { data, envelope } = await this.transport.request<Transaction[]>({
@@ -126,9 +136,9 @@ export class BillsResource {
     });
     return {
       transactions: data,
-      total: envelope.meta.total ?? data.length,
-      limit: envelope.meta.limit ?? data.length,
-      offset: envelope.meta.offset ?? 0,
+      total: envelope.meta?.total ?? data.length,
+      limit: envelope.meta?.limit ?? data.length,
+      offset: envelope.meta?.offset ?? 0,
     };
   }
 
@@ -155,6 +165,7 @@ export class BillsResource {
   /**
    * Fetch one transaction. `GET /v3/bills/transactions/{id}`.
    *
+   * The only call that returns `bills`, so read it before acting on a discovery.
    * Someone else's transaction returns `404`, not `403`.
    */
   async get(transactionId: string, signal?: AbortSignal): Promise<Transaction> {
@@ -173,6 +184,12 @@ export class BillsResource {
    * Available for `SUCCESS` only. `receiptUrl` is set on every success even when the
    * manager holds no bytes, so this can still throw `BillPayNotFoundError` — always
    * handle that rather than assuming a URL means a file.
+   *
+   * The server names the file in `Content-Disposition`, which a browser is not allowed
+   * to read: the header is not CORS-safelisted and the API exposes none. So in a browser
+   * the fallback name is the normal outcome, and it is built from `Content-Type` — which
+   * *is* safelisted — so that `saveAs(blob, receipt.filename)` still produces something
+   * the operating system will open.
    */
   async receipt(transactionId: string, signal?: AbortSignal): Promise<Receipt> {
     assertTransactionId(transactionId);
@@ -181,10 +198,55 @@ export class BillsResource {
       path: `/v3/bills/transactions/${transactionId}/receipt`,
       signal,
     });
+    const contentType = res.headers.get('content-type');
     return {
       bytes: res.bytes,
-      contentType: res.headers.get('content-type') ?? 'application/octet-stream',
-      filename: filenameFromDisposition(res.headers) ?? `receipt-${transactionId}`,
+      contentType: contentType ?? 'application/octet-stream',
+      filename:
+        filenameFromDisposition(res.headers) ??
+        `receipt-${transactionId}${extensionForContentType(contentType)}`,
+      requestId: res.headers.get('x-request-id'),
+    };
+  }
+
+  /**
+   * Download AADL's *avis de paiement*. `GET /v3/bills/transactions/{id}/avis`.
+   *
+   * **The live deployment does not route this yet.** The endpoint is fully documented
+   * and implemented here against that contract, but today the server answers a
+   * router-level miss, which the transport surfaces as `BillPayNotFoundError`. Expect
+   * that, keep the call behind the same `catch` you use for a missing receipt, and the
+   * day it ships your code will start returning a PDF instead.
+   *
+   * **AADL only.** Every other partner answers `404` — read `partner` on the
+   * transaction and offer the download only when it is `AADL`. For everyone else
+   * {@link receipt} is the document you want, and it is not the same document: the
+   * receipt proves your payment went through, the avis is AADL's own statement of what
+   * the housing file owes.
+   *
+   * **Addressed by transaction, never by housing file.** There is no `codeloc`
+   * parameter and none is accepted — if your code builds one, it is calling the wrong
+   * thing. That is deliberate: AADL's own export page answers with a PDF for any code
+   * it is given, so proxying a caller-supplied one would turn this into a way to
+   * enumerate other people's files. Resolving the file from a transaction you own makes
+   * that impossible.
+   *
+   * The transaction does **not** have to be `SUCCESS` — unlike the receipt, any AADL
+   * transaction of yours that has resolved a bill can produce an avis, so a `READY`
+   * discovery is enough. Fetch it fresh each time: AADL regenerates the document every
+   * period, which is why the response says `no-store`.
+   */
+  async avis(transactionId: string, signal?: AbortSignal): Promise<Avis> {
+    assertTransactionId(transactionId);
+    const res = await this.transport.requestRaw({
+      method: 'GET',
+      path: `/v3/bills/transactions/${transactionId}/avis`,
+      signal,
+    });
+    return {
+      bytes: res.bytes,
+      contentType: res.headers.get('content-type') ?? 'application/pdf',
+      filename: filenameFromDisposition(res.headers) ?? `avis_${transactionId}.pdf`,
       requestId: res.headers.get('x-request-id'),
     };
   }
@@ -214,7 +276,25 @@ export class BillsResource {
     return this.poll(transactionId, (t) => isTerminal(t.status), opts);
   }
 
-  /** Shared poll loop: exponential backoff to a ceiling, abortable, deadline-bounded. */
+  /**
+   * Shared poll loop: exponential backoff to a ceiling, abortable, deadline-bounded.
+   *
+   * Two rules hold it together, and both exist because the thing being watched may be a
+   * payment in flight.
+   *
+   * **A failed read is not a failed transaction.** A 5xx, a rate limit, a dropped socket
+   * — none of them says anything about the payment, so none of them ends the wait. The
+   * loop keeps the last status it did see and carries on to the deadline. Only a refusal
+   * that will not change its mind — a 404, a 401, a malformed id — is rethrown, because
+   * polling harder will not fix any of those. Abandoning a watch over a five-second blip
+   * is how an in-flight payment ends up with nobody looking at it.
+   *
+   * **`timeoutMs` bounds the whole wait, not just the naps.** The deadline is enforced
+   * with a signal handed to every read, so a request that hangs, or a `Retry-After` the
+   * transport is sleeping through, cannot push the give-up past the budget the caller
+   * set. Without that, one read could outlast the timeout on its own and the handoff to
+   * background reconciliation would fire long after the request it belonged to was gone.
+   */
   private async poll(
     transactionId: string,
     done: (t: Transaction) => boolean,
@@ -226,23 +306,59 @@ export class BillsResource {
 
     const deadline = Date.now() + timeoutMs;
     let last: Transaction | undefined;
+    let lastFailure: BillPayError | undefined;
 
-    for (;;) {
-      if (opts.signal?.aborted) throw new BillPayAbortError();
+    // One signal for both reasons to stop, plus a flag to tell them apart afterwards:
+    // the caller changing their mind is an abort, the deadline arriving is a poll
+    // timeout, and a caller who catches the wrong one reconciles the wrong thing.
+    let deadlineReached = false;
+    const ctl = new AbortController();
+    const timer = setTimeout(() => {
+      deadlineReached = true;
+      ctl.abort();
+    }, timeoutMs);
+    const onCallerAbort = (): void => ctl.abort();
+    opts.signal?.addEventListener('abort', onCallerAbort, { once: true });
 
-      last = await this.get(transactionId, opts.signal);
-      if (done(last)) return last;
+    const giveUp = (): BillPayPollTimeoutError =>
+      new BillPayPollTimeoutError(
+        `Transaction ${transactionId} did not settle within ${timeoutMs}ms ` +
+          `(last status: ${last?.status ?? 'never read'}).`,
+        { transactionId, lastStatus: last?.status, cause: lastFailure },
+      );
 
-      if (Date.now() + interval >= deadline) {
-        throw new BillPayPollTimeoutError(
-          `Transaction ${transactionId} did not settle within ${timeoutMs}ms ` +
-            `(last status: ${last.status}).`,
-          { transactionId, lastStatus: last.status },
-        );
+    try {
+      for (;;) {
+        if (opts.signal?.aborted) throw new BillPayAbortError();
+
+        try {
+          last = await this.get(transactionId, ctl.signal);
+          if (done(last)) return last;
+        } catch (e) {
+          // `isRetryable` is already the SDK's answer to "would the same request
+          // plausibly work later?", and it is `false` for an abort, so the cancellation
+          // paths fall through to the outer catch untouched.
+          if (!(e instanceof BillPayError) || !e.isRetryable) throw e;
+          lastFailure = e;
+        }
+
+        if (Date.now() + interval >= deadline) throw giveUp();
+
+        await sleep(interval, ctl.signal);
+        interval = Math.min(interval * 2, maxIntervalMs);
       }
-
-      await sleep(interval, opts.signal);
-      interval = Math.min(interval * 2, maxIntervalMs);
+    } catch (e) {
+      // The deadline signal and the caller's are the same signal by the time a read or a
+      // nap sees it, so this is where they are told apart again. The caller's own abort
+      // wins if both fired: they asked to stop, and that is a different event from a
+      // budget running out.
+      if (e instanceof BillPayAbortError && deadlineReached && !opts.signal?.aborted) {
+        throw giveUp();
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
+      opts.signal?.removeEventListener('abort', onCallerAbort);
     }
   }
 }
