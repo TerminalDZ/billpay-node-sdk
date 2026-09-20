@@ -84,6 +84,9 @@ on the wire and in the type.
 
 ## 0.4.0 — 2026-09-20
 
+> Not published to npm on its own. These changes reached the registry as part of 0.5.0,
+> which is the first release to carry them.
+
 SEAAL is live, and this SDK described it twice over as something it is not: unreachable,
 and addressed by a `reference`. Neither was true. The partner is integrated, `ACTIVE`
 alongside ADE, AADL and SONELGAZ, and has settled a real payment in production — and its
