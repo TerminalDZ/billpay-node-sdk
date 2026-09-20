@@ -3,6 +3,164 @@
 All notable changes to `@terminaldz/billpay-sdk`. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.5.0 — 2026-09-20
+
+A SEAAL customer owing five quarters used to pay five times — and be charged the 30 DZD
+fee floor five times over, 150.00 in fees on an order that should cost 30.00.
+`POST /v3/bills/pay` now takes a `billIds` array beside the single `billId`: the selection
+becomes one portal order and one card payment, so the service fee is computed **once, on
+the combined total**. That arithmetic is the whole of this release. `billId` is untouched,
+on the wire and in the type.
+
+### Added
+
+- **`billIds` on `pay()` — 1 to 50 ids, each max 100 characters, none of them repeated.**
+  A repeat is `400 ERR_VALIDATION`, "billIds must not repeat the same bill id". The
+  selection settles as one order and is charged one fee on the sum of the chosen bills,
+  never the sum of the `fee` each bill carries: three SEAAL factures of 327.00, 512.66 and
+  735.15 total 1574.81, whose 0.5 percent is 7.87 — under the 30 DZD floor, so the order
+  is charged 30.00 once and debits 1604.81, against 1664.81 for the same three paid one by
+  one. It is **all or nothing**: every id has to be on the transaction, applied in a single
+  atomic transition that requires all of them, so one stale or forged id fails the whole
+  payment rather than quietly settling the subset that was still good. The already-paid and
+  payment-in-progress guards run for every id, and each reads both the aggregate and the
+  itemised lines of earlier payments, so a facture settled before as one line of a group is
+  still recognised as paid.
+- **`SingleBillPayParams` and `MultiBillPayParams`, both exported.** `PayParams` is now
+  their union, modelled the way `AccountIdentifier` is: each member pins the other key to
+  `never`, so naming both selections — or neither — is a compile error rather than a `400`
+  met in front of a customer. The API's own gate says the same thing: "Provide exactly one
+  of billId or billIds".
+- **`pay()` refuses a both-given selection before spending a request.** The types make it
+  impossible in TypeScript; this is for the JavaScript caller they never reach. The two
+  keys are mutually exclusive upstream, so an SDK that quietly picked one of a
+  contradictory pair would settle a selection nobody asked for, with money behind it.
+  Nothing else about the selection is checked here — an empty array, a fifty-first id, a
+  repeated one are each refused by the API in a sentence that names the rule, and a limit
+  copied into the SDK is a limit that goes stale the day the server relaxes it.
+
+### Changed
+
+- **`PayParams` is a type alias union, not an interface.** Every existing
+  `{ transactionId, billId, ref }` call site compiles unchanged and serialises byte for
+  byte as it did — a regression test pins the exact JSON, because a body assembled by
+  spreading one branch of a union is exactly the kind of thing that grows a stray
+  `billIds: undefined`. The one source-level consequence is that a union cannot be
+  `extends`ed or declaration-merged: `interface Mine extends PayParams` no longer compiles.
+  Intersect it instead.
+
+### Documentation
+
+- **`Transaction.selectedBill` is the aggregate after a `billIds` payment**, not one of
+  the factures: `amount` is the sum, `fee` is the single fee on that sum, and `billId` is
+  the **first** id you sent. `total` is therefore the whole order. `Bill` carries no count
+  of what went into it, so keep your own list of what you selected.
+- **`Bill.fee` does not add up across a selection.** It is what that bill costs to settle
+  on its own; summing it over a picker's checkboxes overstates the charge wherever a floor
+  is in play, which for SEAAL is everywhere.
+- **Multi-bill is no longer described as out of reach.** 0.4.0 said settling several
+  factures as one order was a B2C capability "not reachable from here", and the README
+  told a reader not to quote the fee-once-on-the-total figure for a `/v3` order. Both are
+  withdrawn: it is on this surface now, and the README has a section on it. Also withdrawn
+  is the advice that followed from it — a SEAAL customer no longer settles one facture per
+  day around the 24-hour double-pay guard; the arrears list goes as one order.
+- **The SEAAL fee rule printed in 0.4.0 was wrong.** It is 0.5 percent floored at 30 DZD
+  and capped at 60 DZD — `fee = min(60, max(30, total × 0.5 / 100))`, computed on the
+  selected total — not 2.5 percent floored at 10 and capped at 50. A few hundred dinars
+  never clears the floor, so a SEAAL order under 6000.00 is charged exactly 30.00 however
+  many factures it carries. The order minimum was wrong with it: **200 DZD**, and on the
+  selected **total**, so two factures each under it can still be payable together. The
+  numbers matter more than they did when every payment was one bill — they are what tells
+  a reseller whether to quote 30.00 or 90.00 — which is why the correction travels with
+  this release rather than waiting for a documentation one.
+- **Sandbox mirrors the production arithmetic.** A `billIds` order is assembled there the
+  same way: same aggregate, one fee on the selected total, `selectedBill.billId` the first
+  id sent. Only the fee's own value differs, and it differs for single bills too —
+  sandbox still answers `fee: 0`.
+- **The sandbox row labelled "Multi-bill" is now "Two bills discovered".** It is a SONELGAZ
+  discovery that returns two payable bills, which is not the same claim as a portal that
+  accepts two documents in one transaction. Today that is SEAAL, and the scope note says so
+  on the type: elsewhere `billIds` with one entry is `billId` spelled longer.
+
+## 0.4.0 — 2026-09-20
+
+SEAAL is live, and this SDK described it twice over as something it is not: unreachable,
+and addressed by a `reference`. Neither was true. The partner is integrated, `ACTIVE`
+alongside ADE, AADL and SONELGAZ, and has settled a real payment in production — and its
+account identifier is a nested **pair**, not a key. This release adds the shape SEAAL
+actually takes and corrects everything that said otherwise.
+
+### Added
+
+- **`SeaalAccount` — `{ seaal: { code_client, code_contrat } }`.** Both halves are
+  required, because the portal authenticates on the pair rather than on either half:
+  `code_client` is 2 to 6 alphanumeric characters (`^[A-Za-z0-9]{2,6}$`), `code_contrat`
+  is 2 to 10 digits (`^\d{2,10}$`), and both are printed on the customer's paper water
+  bill. `'seaal'` joins the `AccountKey` union with it, which is what pins
+  `seaal?: never` on every other member of `AccountIdentifier`; without that, an object
+  carrying `seaal` beside a second identifier would have type-checked and then been
+  refused on the wire, which is precisely the mistake the union exists to prevent. There
+  is no flat SEAAL shorthand to fall back to — SEAAL has no single key that identifies an
+  account.
+
+### Documentation
+
+- **SEAAL does not use `reference`.** `ReferenceAccount`'s TSDoc read "ADE and SEAAL" and
+  the README's partner table gave SEAAL a `reference` of up to 50 characters. Both
+  described an identifier the portal has never accepted, so a caller who believed either
+  had no way to reach the partner at all. `ReferenceAccount` is ADE's and only ADE's, and
+  `ElectronicPaymentKeyAccount`'s exactly-25-character key is not a SEAAL shorthand
+  either.
+- **SEAAL echoes back flat as `codeClient`, not `reference`.** The echo keys by partner
+  are `reference` (ADE), `contractNumber` (SONELGAZ), `codeloc` (AADL), `phoneNumber`
+  (Algérie Télécom) and `codeClient` (SEAAL) — so a nested `seaal{}` comes back as
+  `codeClient`, mirroring how `aadl{}` comes back as `codeloc`.
+- **The identifier gate is quoted as it now reads.** A request with zero or two
+  identifiers answers "Exactly one of electronic_payment_key, phone_number, sonelgaz,
+  ade, aadl, or seaal is required". The README quoted an older sentence in the AADL
+  section, which is also the one place a reader looks for what a mis-nested identifier
+  does.
+- **0.3.0's claim that SEAAL was unavailable is withdrawn.** That release note and the
+  README both named `SEAAL` as the partner answering `503 PARTNER_UNAVAILABLE` for every
+  identifier. It answers in about 194 ms with `status: 'ACTIVE'`. The advice around the
+  claim stands, and is the reason printing the claim was a mistake in the first place:
+  availability is a runtime fact — read `client.partners()`.
+- **SEAAL is the first partner that genuinely needs a bill picker.** A water account is
+  billed quarterly and commonly owes several quarters at once; one account verified in
+  production had 45 outstanding. The README's AADL section used to name SONELGAZ as the
+  partner a multi-bill screen was built for; it now names SEAAL, and AADL is unchanged as
+  the one-aggregate-avis partner it has always been.
+- **Multi-bill settlement is a B2C capability, and is documented as one.** The B2C route
+  accepts either a single `bill_id` or an array of `bill_ids`, settles the selection as
+  one portal order and one card payment, and charges the fee **once on the total**. `/v3`
+  — the surface this SDK speaks — still pays a single `billId`, so `pay()` is unchanged
+  and that arithmetic does not apply to it. Said plainly in the README, because quoting a
+  B2C total for a `/v3` order would misprice every bill a reseller shows.
+- **SEAAL's fee rule.** 2.5 percent, floored at 10 DZD and capped at 50 DZD:
+  `fee = min(50, max(10, amount × 2.5 / 100))`. The platform publishes it on its status
+  route as `fee_rule` (`{ percent, min, max }`); the SDK does not model that field, so
+  read the `fee` the transaction reports rather than recomputing one.
+- **The three SEAAL refusals an integrator will meet.** A 100 DA minimum order ("Le
+  montant total sélectionné doit être au moins de 100 DA", raised as a `500`); a
+  temporary per-account lockout ("Compte temporairement bloqué. Réessayez dans
+  4 heure(s)."), which is `UPSTREAM_UNAVAILABLE` internally but reaches `/v3` as
+  `PARTNER_UNAVAILABLE` — a `503`, or a `FAILED` discovery's `error.code` — and so is
+  indistinguishable here from a real portal outage, which is why the advice is "try later"
+  rather than "check your codes"; and "Vous êtes à jour, merci pour votre fidélité.",
+  which at discovery is `READY` with an empty `bills` array, not a failure.
+  Also documented: the portal answers "Veuillez vérifier vos informations." to a bad
+  captcha and to bad credentials alike, so the platform retries before blaming the
+  account, and reconciliation is by absence — a paid facture stops being returned in the
+  unpaid list.
+- **A SEAAL `billId` _is_ the invoice number** (`numero_fac`, e.g. `F059107046`), so
+  there is no lookup between discovery and payment, and `period` reads as the customer's
+  quarter (`'1er trimestre 2026'`). The receipt carries SEAAL's own "Numéro d'opération
+  SEAAL" beside SATIM's "Numéro de transaction" and "Numéro d'autorisation".
+- **The sandbox SEAAL scenarios are listed.** `100001` five unpaid quarters — the
+  signature multi-bill shape — `100002` a single facture, `100003` a settled account,
+  `100004` a decline at payment, `100005` a pair the portal rejects with
+  `400 INVALID_ACCOUNT`. They key off `code_client`, and the pair is still required.
+
 ## 0.3.0 — 2026-09-19
 
 Two of the fixes below are the reason this release exists: the SDK had the wrong host and

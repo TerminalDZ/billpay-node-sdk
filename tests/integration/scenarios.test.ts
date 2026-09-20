@@ -115,14 +115,20 @@ const SONELGAZ = {
 const LANDLINE = '023456789';
 
 /**
- * A SEAAL reference. Same `reference` slot as ADE, up to fifty characters.
+ * SEAAL water accounts. The identifier is a **pair** and both halves are mandatory:
+ * `code_client` is 2–6 alphanumeric characters, `code_contrat` is 2–10 digits. There is
+ * no flat shorthand — `reference` is ADE's and has never reached SEAAL, whatever earlier
+ * versions of this file asserted while the biller was switched off.
  *
- * The SEAAL rows in the matrix are the ones nobody has been able to observe: the biller
- * is refused before a scenario is even chosen while it is switched off, so every
- * identifier answers `503 PARTNER_UNAVAILABLE` and the documented outcome stays
- * theoretical. See the test for what that means for its assertions.
+ * The sandbox branches on `code_client` alone; `code_contrat` is an authentication
+ * factor, not a selector, so the same one is used throughout.
  */
-const SEAAL_REFERENCE = '0123456789012340000000000';
+const SEAAL = {
+  /** READY, five unpaid quarterly factures — the signature multi-bill shape. */
+  quarters: { code_client: '100001', code_contrat: '446547' },
+  /** READY, `bills: []` — the account is fully settled. */
+  settled: { code_client: '100003', code_contrat: '446547' },
+} as const;
 
 // ─── Local helpers ────────────────────────────────────────────────────────────
 
@@ -814,27 +820,48 @@ describe.skipIf(!liveTelecom)('Algérie Télécom — the landline row', () => {
 
 // ─── SEAAL ────────────────────────────────────────────────────────────────────
 
-describe.skipIf(!liveSeaal)('SEAAL — reachable only while the operator has it on', () => {
+describe.skipIf(!liveSeaal)('SEAAL — the pair goes out, one flat key comes home', () => {
   it(
-    'a reference discovers like every other partner once the biller is switched on',
+    'the code_client/code_contrat pair discovers several quarters and echoes codeClient',
     async () => {
-      // This is the scenario the gating exists for, and it is the honest shape of one:
-      // a biller the operator has switched off is refused before the sandbox picks an
-      // outcome, so the SEAAL rows of the matrix have never been seen and no amount
-      // here could be written down truthfully. What the contract does promise is that
-      // SEAAL is an ordinary `reference` partner — so that is what this asserts, and it
-      // starts running the day SEAAL comes back without anyone editing the file.
-      const { ack, txn } = await discoverReady(
-        'SEAAL',
-        { reference: SEAAL_REFERENCE },
-        'seaal-reference',
-      );
+      // The two facts that make SEAAL unlike every other row in this file: the request
+      // identifier is a nested pair, and the response flattens it to `codeClient` — not
+      // to `reference`, which is ADE's and which this suite wrongly asserted for SEAAL
+      // for as long as the biller was switched off and the assertion never ran.
+      const { ack, txn } = await discoverReady('SEAAL', { seaal: SEAAL.quarters }, 'seaal-pair');
 
       expect(ack.status).toBe('PENDING');
       expect(txn.status).toBe('READY');
       expect(txn.partner).toBe('SEAAL');
-      expect(txn.account).toEqual({ reference: SEAAL_REFERENCE });
-      expect(Array.isArray(txn.bills)).toBe(true);
+      expect(txn.account).toEqual({ codeClient: SEAAL.quarters.code_client });
+
+      // Water is billed quarterly and nothing forces a household to settle each quarter
+      // as it lands, so a list — not a single aggregate — is the normal answer here, and
+      // every entry is separately payable. In production `billId` is the invoice number
+      // (`numero_fac`, e.g. `F059107046`); the sandbox mints its own, which is exactly
+      // why this asserts the ids are distinct and non-empty rather than their shape.
+      expect(txn.bills!.length).toBeGreaterThan(1);
+      const ids = txn.bills!.map((b) => b.billId);
+      expect(new Set(ids).size).toBe(ids.length);
+      for (const bill of txn.bills!) {
+        expect(bill.billId).not.toBe('');
+        expect(bill.amount).toBeGreaterThan(0);
+      }
+    },
+    NET,
+  );
+
+  it(
+    'a fully settled account is READY with an empty list, not an error',
+    async () => {
+      // SEAAL's reconciliation signal is absence: a paid facture stops being returned.
+      // So "nothing outstanding" arrives as a result, and an integration that treats an
+      // empty list as a failure tells a paid-up customer their account is broken.
+      const { txn } = await discoverReady('SEAAL', { seaal: SEAAL.settled }, 'seaal-settled');
+
+      expect(txn.status).toBe('READY');
+      expect(txn.bills).toEqual([]);
+      expect(txn.error).toBeUndefined();
     },
     NET,
   );

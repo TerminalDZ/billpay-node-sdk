@@ -53,12 +53,15 @@ export type PartnersMap = Record<string, { status: PartnerStatus }>;
  *
  * The union below makes a wrong combination a compile-time error. Each member is
  * "one field, plus every other field explicitly `never`", which is what stops
- * TypeScript from silently accepting an object with two identifiers.
+ * TypeScript from silently accepting an object with two identifiers. The server says the
+ * same thing at runtime: "Exactly one of electronic_payment_key, phone_number, sonelgaz,
+ * ade, aadl, or seaal is required".
  *
  * Responses echo a **flat** identifier, keyed by partner:
- * `reference` (ADE, SEAAL) · `contractNumber` (SONELGAZ) · `codeloc` (AADL) ·
- * `phoneNumber` (Algérie Télécom). The nested request forms (`ade{}`, `aadl{}`) are
- * flattened on the way out — `ade{}` echoes as `reference`, `aadl{}` as `codeloc`.
+ * `reference` (ADE) · `contractNumber` (SONELGAZ) · `codeloc` (AADL) ·
+ * `phoneNumber` (Algérie Télécom) · `codeClient` (SEAAL). The nested request forms
+ * (`ade{}`, `aadl{}`, `seaal{}`) are flattened on the way out — `ade{}` echoes as
+ * `reference`, `aadl{}` as `codeloc`, and `seaal{}` as `codeClient` alone.
  */
 export type AccountIdentifier =
   | ReferenceAccount
@@ -68,7 +71,8 @@ export type AccountIdentifier =
   | PhoneNumberSnakeAccount
   | SonelgazInvoiceAccount
   | AdeInvoiceAccount
-  | AadlAccount;
+  | AadlAccount
+  | SeaalAccount;
 
 /** Only the listed key may be present; the rest are pinned to `never`. */
 type Only<K extends string> = { [P in Exclude<AccountKey, K>]?: never };
@@ -81,9 +85,15 @@ type AccountKey =
   | 'phone_number'
   | 'sonelgaz'
   | 'ade'
-  | 'aadl';
+  | 'aadl'
+  | 'seaal';
 
-/** ADE and SEAAL. Max 50 characters. */
+/**
+ * ADE. Max 50 characters.
+ *
+ * ADE only. SEAAL used to be documented as sharing this slot; it does not — it takes the
+ * nested pair {@link SeaalAccount} and has no flat identifier at all.
+ */
 export type ReferenceAccount = { reference: string } & Only<'reference'>;
 
 /** SONELGAZ. Max 50 characters. */
@@ -100,7 +110,12 @@ export type ContractNumberAccount = { contractNumber: string } & Only<'contractN
  */
 export type PhoneNumberAccount = { phoneNumber: string } & Only<'phoneNumber'>;
 
-/** Internal snake_case form. Exactly 25 characters — not "up to", exactly. */
+/**
+ * Internal snake_case form. Exactly 25 characters — not "up to", exactly.
+ *
+ * It is not the SEAAL identifier either, whatever a 25-character key was once said to
+ * cover: SEAAL authenticates on a pair, {@link SeaalAccount}.
+ */
 export type ElectronicPaymentKeyAccount = {
   electronic_payment_key: string;
 } & Only<'electronic_payment_key'>;
@@ -137,10 +152,43 @@ export type AdeInvoiceAccount = {
  * bill says how many in `breakdown.unpaidPeriods` — and AADL publishes no per-period
  * invoice behind that total. So a discovery returns one payable entry however far behind
  * the tenant is, none of it is separately payable, and the multi-bill picker you built
- * for SONELGAZ is the wrong screen here: it will render a list of one, forever. Show the
+ * for SEAAL is the wrong screen here: it will render a list of one, forever. Show the
  * total, and pay it whole.
  */
 export type AadlAccount = { aadl: { codeloc: string } } & Only<'aadl'>;
+
+/**
+ * SEAAL nested pair form. Both fields required — the portal authenticates on the PAIR.
+ *
+ * `code_client` is 2 to 6 alphanumeric characters, `^[A-Za-z0-9]{2,6}$`; `code_contrat`
+ * is 2 to 10 digits, `^\d{2,10}$`. Both are printed on the customer's paper water bill,
+ * and neither is optional: send one without the other and the validator answers
+ * "seaal.code_client must be 2 to 6 alphanumeric characters" or "seaal.code_contrat
+ * must be 2 to 10 digits".
+ *
+ * There is **no flat shorthand**. SEAAL has no single key that identifies an account, so
+ * neither `reference` nor `electronic_payment_key` stands in for the pair however
+ * convenient that would be. Responses do flatten it, to `codeClient` alone — that is an
+ * echo, not a form you can send back.
+ *
+ * **A water account commonly owes many bills at once.** Factures are quarterly and a real
+ * account has been seen carrying 45 of them, so SEAAL is the partner a multi-bill picker
+ * is actually for — the opposite of {@link AadlAccount}'s single aggregate. Settle the
+ * whole selection in one call: {@link MultiBillPayParams} sends `billIds`, the portal
+ * receives one transaction, and the fee is charged once on the total.
+ *
+ * Paying them one at a time costs twice over, which is worth knowing before you build the
+ * picker. SEAAL's fee is floored at 30 DZD and a facture is a few hundred dinars, so every
+ * separate payment is charged that floor — five quarters settled one by one cost 150.00 in
+ * fees against 30.00 for the same five as one order. And the account-level double-pay
+ * guard is keyed on `code_client` and windowed at 24 hours, so a *second* discovery for
+ * the same water account inside that window — after one quarter has settled — answers
+ * `409 BILL_ALREADY_PAID` rather than listing the rest. One order is not a convenience
+ * here; it is how an arrears list gets cleared in one sitting.
+ */
+export type SeaalAccount = {
+  seaal: { code_client: string; code_contrat: string };
+} & Only<'seaal'>;
 
 // ─── Statuses ─────────────────────────────────────────────────────────────────
 
@@ -331,6 +379,11 @@ export interface BillBreakdown {
 /**
  * One payable bill. `fee` is already included in `Transaction.total` when selected.
  *
+ * `fee` is what this bill costs to settle **on its own**, and it does not add up across a
+ * selection: several bills paid together are one order carrying one fee on the combined
+ * total, which is less than these figures summed wherever a floor is in play. See
+ * {@link MultiBillPayParams}.
+ *
  * Sandbox returns `fee: 0`, so `total === amount` there and an integration that quietly
  * charges `amount` looks correct right up until production. Read both.
  */
@@ -358,8 +411,10 @@ export interface Transaction {
   status: TransactionStatus;
   partner: string;
   /**
-   * The identifier echoed **flat**, one key: `reference` (ADE, SEAAL) ·
-   * `contractNumber` (SONELGAZ) · `codeloc` (AADL) · `phoneNumber` (Algérie Télécom).
+   * The identifier echoed **flat**, one key: `reference` (ADE) · `contractNumber`
+   * (SONELGAZ) · `codeloc` (AADL) · `phoneNumber` (Algérie Télécom) · `codeClient`
+   * (SEAAL). The SEAAL echo is the `code_client` half alone — the pair does not survive
+   * the round trip, so keep your own copy of `code_contrat`.
    */
   account: Record<string, string>;
   currency: string;
@@ -380,8 +435,20 @@ export interface Transaction {
   completedAt: string | null;
   /** Present when `status === 'READY'`. Empty array means nothing payable. */
   bills?: Bill[];
+  /**
+   * What the transaction settled, as **one line** however many bills went into it.
+   *
+   * After a `billIds` payment this is the aggregate of the selection rather than one of
+   * the factures in it: `amount` is the sum of the chosen bills, `fee` is the single fee
+   * computed on that sum, and `billId` is the **first** id you sent — not a bill you can
+   * reconcile against on its own. {@link Bill} carries no count, so keep your own list of
+   * what you selected. See {@link MultiBillPayParams}.
+   */
   selectedBill?: Bill;
-  /** `selectedBill.amount + selectedBill.fee`, present once a bill is selected. */
+  /**
+   * `selectedBill.amount + selectedBill.fee`, present once a bill is selected — so for a
+   * multi-bill order it is the whole order: every chosen bill, plus one fee.
+   */
   total?: number;
   /**
    * Set on **every** `SUCCESS`, even when no bytes exist for it — so the download
@@ -430,11 +497,22 @@ export interface DiscoverParams {
   ref: string;
 }
 
-/** `POST /v3/bills/pay`. */
-export interface PayParams {
+/**
+ * `POST /v3/bills/pay`.
+ *
+ * A payment names **exactly one** selection: a single `billId`, or a `billIds` array.
+ * Both, or neither, is rejected — `400 ERR_VALIDATION`, "Provide exactly one of billId
+ * or billIds". So the two forms are a union rather than two optional fields, in the same
+ * spirit as {@link AccountIdentifier}: each member pins the other key to `never`, which
+ * makes the wrong combination a compile error instead of a refusal you meet in front of
+ * a customer.
+ */
+export type PayParams = SingleBillPayParams | MultiBillPayParams;
+
+/** What both forms carry. The bills are the only thing that differs. */
+type PayCommon = {
   /** 24-character lowercase hex. Anything else is rejected by `paySchema`. */
   transactionId: string;
-  billId: string;
   /**
    * Required, max 100 characters. Use a value of your own per payment —
    * {@link payRefFor} derives one from the discovery ref.
@@ -450,7 +528,54 @@ export interface PayParams {
    * {@link BillsResource.getByRef} with the *discovery* ref to recover.
    */
   ref: string;
-}
+};
+
+/**
+ * Pay one discovered bill, named by its `billId`. Max 100 characters.
+ *
+ * Unchanged, and still the right form nearly everywhere: every partner but SEAAL returns
+ * a single bill from a discovery anyway. `billIds: [id]` is equivalent — one bill is one
+ * order either way — so there is nothing here to migrate.
+ */
+export type SingleBillPayParams = PayCommon & { billId: string; billIds?: never };
+
+/**
+ * Pay several discovered bills as **one order**. 1 to 50 ids, each max 100 characters,
+ * and no id twice: a repeat is `400 ERR_VALIDATION`, "billIds must not repeat the same
+ * bill id".
+ *
+ * **One fee, computed on the combined total.** This is the surprising part, and the
+ * reason the form exists. The selection becomes one portal order and one card payment,
+ * so it is charged a single service fee on the sum — never the sum of the `fee` each
+ * {@link Bill} carries. SEAAL's rule is 0.5 %, floored at 30 DZD and capped at 60 DZD,
+ * and a water facture is a few hundred dinars, so the percentage never clears the floor
+ * and a facture settled alone costs exactly 30.00 in fees. Three of them — 327.00,
+ * 512.66 and 735.15 — total 1574.81, whose 0.5 % is 7.87, still under the floor: the
+ * order is charged 30.00 once and debits 1604.81. Paid one by one the same three cost
+ * 90.00 in fees. Quote the total, then one fee on it; adding the per-bill figures up
+ * overcharges the customer.
+ *
+ * **All or nothing.** Every id must belong to the transaction. The selection is applied
+ * in a single atomic transition that requires *all* of them, so one stale or forged id
+ * fails the whole payment rather than quietly settling the subset that was still good.
+ * The already-paid and payment-in-progress guards run for every id too, and each looks at
+ * both the aggregate and the itemised lines of earlier payments — a facture settled
+ * before as one line of a group is still recognised as paid.
+ *
+ * **The transaction reports the aggregate**, not the lines: see
+ * {@link Transaction.selectedBill}, whose `billId` is the first id of your selection.
+ *
+ * **Only some billers can do this.** It is meaningful where the biller's own portal
+ * accepts several documents in one transaction, which today is SEAAL — quarterly water,
+ * where an account routinely owes many unpaid quarters and 25 on a verified production
+ * account is ordinary. Everyone else returns a single bill from discovery, so `billIds`
+ * with one entry there is {@link SingleBillPayParams} spelled longer.
+ *
+ * Sandbox does the same arithmetic as production — the same aggregate, the same one fee
+ * on the total — so the shape you validate there is the shape you will be charged. Its
+ * `fee` is still `0`, as it is for every partner in sandbox.
+ */
+export type MultiBillPayParams = PayCommon & { billIds: string[]; billId?: never };
 
 /** `GET /v3/bills/transactions`. */
 export interface ListParams {

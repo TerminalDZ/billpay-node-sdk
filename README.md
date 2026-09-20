@@ -4,7 +4,7 @@ The official Node.js/TypeScript SDK for the **OneClickDz Bill Payment API** (`/v
 
 Pay Algerian utility and telecom bills — ADE, SONELGAZ, SEAAL, AADL and Algérie
 Télécom — through one API: discover what an account owes, pay one of the discovered
-bills, wait for the outcome, download the receipt.
+bills or several of them as a single order, wait for the outcome, download the receipt.
 
 Zero runtime dependencies, and no `node:` imports anywhere in the module graph, so the
 same build serves Node 18+ and the browser. Ships CommonJS, ESM and type declarations.
@@ -127,7 +127,7 @@ if (settled.status === 'SUCCESS') {
 
 ### Runnable examples
 
-All three run against the real API with a sandbox key, which is what keeps them harmless:
+All four run against the real API with a sandbox key, which is what keeps them harmless:
 no portal is touched and no money moves. Each refuses to start unless `validate()` says
 `SANDBOX`. Build first — they import the package by name, exactly as your own code would,
 and so resolve through `exports` to `dist/`.
@@ -142,12 +142,86 @@ node --env-file=.env --experimental-strip-types examples/pay-a-bill.ts
 - [`examples/aadl-avis.ts`](./examples/aadl-avis.ts) — AADL by `codeloc`: the flat echo,
   the single aggregate avis and its `breakdown`, and why there is no bill to pick.
   `BILLPAY_AADL_CODELOC` selects which sandbox scenario you get.
+- [`examples/seaal-quarters.ts`](./examples/seaal-quarters.ts) — SEAAL by the
+  `code_client`/`code_contrat` pair: a water account with several unpaid quarters, the
+  `codeClient` echo, and paying one of them. `BILLPAY_SEAAL_CODE_CLIENT` selects the
+  sandbox scenario.
 - [`examples/recover-after-timeout.ts`](./examples/recover-after-timeout.ts) — a client
   with a deliberately impossible deadline, so both POSTs genuinely land and both answers
   are genuinely lost. Recovers each by reading, never by resending.
 
 Copy [`.env.example`](./.env.example) to `.env` for the variables they read. Node loads
 none of it by itself — `--env-file` is what does.
+
+---
+
+## Paying several bills in one order
+
+A payment names its bills **one way or the other**: a single `billId`, or a `billIds`
+array. Both, or neither, answers `400 ERR_VALIDATION` — "Provide exactly one of billId or
+billIds" — so the type is a union and the wrong combination is a compile error rather than
+a refusal you meet in front of a customer:
+
+```ts
+{ transactionId, billId: 'F059107046', ref }                    // ✅
+{ transactionId, billIds: ['F059107046', 'F059107047'], ref }   // ✅
+{ transactionId, billId: 'F059107046', billIds: ['…'], ref }    // ❌ does not compile
+{ transactionId, ref }                                          // ❌ does not compile
+```
+
+Only the key you used is sent; the other never appears on the wire. `billIds` takes 1 to
+50 ids, each up to 100 characters, and no id twice — a repeat answers "billIds must not
+repeat the same bill id".
+
+**One fee, on the combined total.** This is the part to read twice. The selection becomes
+one portal order and one card payment, so it is charged a single service fee on the sum —
+never the sum of the `fee` each bill carries. SEAAL's rule is 0.5 percent, floored at
+30 DZD and capped at 60 DZD, and a water facture is a few hundred dinars, so the
+percentage never clears the floor and a facture settled on its own costs exactly 30.00 in
+fees:
+
+| Three SEAAL quarters, 327.00 + 512.66 + 735.15 | Amount  | Fees              | Debited     |
+| ---------------------------------------------- | ------- | ----------------- | ----------- |
+| paid one by one, three orders                  | 1574.81 | 3 × 30.00 = 90.00 | **1664.81** |
+| paid together, one order                       | 1574.81 | 30.00             | **1604.81** |
+
+0.5 percent of 1574.81 is 7.87, under the floor, so the order is charged the floor once.
+Quote the total and one fee on it: adding the per-bill fees up overcharges by 60.00 on
+these three, and by more on a longer list. This arithmetic _is_ the reason the array form
+exists.
+
+```ts
+const discovered = await client.bills.waitForReady(transactionId);
+const chosen = (discovered.bills ?? []).filter((b) => picked.has(b.billId));
+
+await client.bills.pay({
+  transactionId,
+  billIds: chosen.map((b) => b.billId),
+  ref: payRefFor(discoveryRef),
+});
+
+const settled = await client.bills.waitForTerminal(transactionId);
+settled.total; // the sum of the chosen bills, plus the one fee on that sum
+```
+
+**All or nothing.** Every id must belong to the transaction. The selection is applied in a
+single atomic transition that requires _all_ of them, so one stale or forged id fails the
+whole payment instead of quietly settling the subset that was still good. The already-paid
+and payment-in-progress guards run for every id too, and each looks at both the aggregate
+and the itemised lines of earlier payments — a facture settled before as one line of a
+group is still recognised as paid.
+
+**The transaction reports the aggregate, not the lines.** `selectedBill` is the order:
+`amount` is the sum, `fee` is the single fee on that sum, and `billId` is the **first** id
+you sent rather than a bill you can reconcile against on its own. `Bill` carries no count,
+so keep your own list of what you selected.
+
+**Today this is SEAAL.** Several documents in one transaction is something the biller's
+own portal has to accept, and SEAAL is the one that does — quarterly water, where an
+account routinely owes many unpaid quarters and 25 on a verified production account is
+ordinary. Every other partner returns a single bill from discovery anyway, so `billIds`
+with one entry is just `billId` spelled longer. Nothing here changes a single-bill call:
+`billId` is unchanged, on the wire and in the type.
 
 ---
 
@@ -374,13 +448,13 @@ server chose from one the SDK inferred on its behalf.
 
 ## Partners and accounts
 
-| Partner           | Account field       | Format                               |
-| ----------------- | ------------------- | ------------------------------------ |
-| `ADE`             | `reference`         | up to 50 characters                  |
-| `SEAAL`           | `reference`         | up to 50 characters                  |
-| `SONELGAZ`        | `contractNumber`    | up to 50 characters                  |
-| `AADL`            | `aadl: { codeloc }` | 6–20 digits                          |
-| `Algérie Télécom` | `phoneNumber`       | `0`, then a digit 2–4, then 7 digits |
+| Partner           | Account field                          | Format                                                |
+| ----------------- | -------------------------------------- | ----------------------------------------------------- |
+| `ADE`             | `reference`                            | up to 50 characters                                   |
+| `SEAAL`           | `seaal: { code_client, code_contrat }` | 2–6 alphanumeric, and 2–10 digits — **both** required |
+| `SONELGAZ`        | `contractNumber`                       | up to 50 characters                                   |
+| `AADL`            | `aadl: { codeloc }`                    | 6–20 digits                                           |
+| `Algérie Télécom` | `phoneNumber`                          | `0`, then a digit 2–4, then 7 digits                  |
 
 `'Algérie Télécom'` carries its accents — it is the literal value the API matches.
 
@@ -388,19 +462,24 @@ The landline is a local number, `^0[2-4][0-9]{7}$`, and the international spelli
 same number is refused: `'+21323456789'` answers `400 ERR_VALIDATION`. If your form
 normalises phone input to E.164, stop short of this field and send `'023456789'`.
 
-An account carries **exactly one** identifier. The union type makes two a compile-time
-error:
+An account carries **exactly one** identifier. Zero, or two, answers `400 ERR_VALIDATION`
+with the gate's own list of the request-side keys it accepts — "Exactly one of
+electronic_payment_key, phone_number, sonelgaz, ade, aadl, or seaal is required". The
+union type makes the two-identifier case a compile-time error:
 
 ```ts
-{ reference: '…' }                      // ✅
-{ reference: '…', contractNumber: '…' } // ❌ does not compile
+{ reference: '…' }                                           // ✅
+{ seaal: { code_client: '471135', code_contrat: '446547' } } // ✅
+{ reference: '…', contractNumber: '…' }                      // ❌ does not compile
 ```
 
-The nested forms (`sonelgaz{}`, `ade{}`, `aadl{}`) and the snake_case forms
-(`electronic_payment_key`, exactly 25 characters; `phone_number`) are also accepted.
-Responses echo a single **flat** key — `reference`, `contractNumber`, `codeloc` or
-`phoneNumber` — so a nested `ade{}` comes back as `reference` and a nested `aadl{}`
-comes back as `codeloc`.
+The nested forms (`sonelgaz{}`, `ade{}`, `aadl{}`, `seaal{}`) and the snake_case forms
+(`electronic_payment_key`, exactly 25 characters; `phone_number`) are also accepted. Two
+of the nested forms are the only form their partner has: AADL is `aadl{ codeloc }`, and
+SEAAL is `seaal{ code_client, code_contrat }`. Responses echo a single **flat** key —
+`reference` (ADE), `contractNumber` (SONELGAZ), `codeloc` (AADL), `phoneNumber` (Algérie
+Télécom) or `codeClient` (SEAAL) — so a nested `ade{}` comes back as `reference`, a
+nested `aadl{}` as `codeloc`, and a nested `seaal{}` as `codeClient`.
 
 ### AADL is `codeloc`, and only `codeloc`
 
@@ -414,8 +493,8 @@ comes back as `codeloc`.
 
 `codeloc` is the housing file number: digits only, 6 to 20 of them, always required. It
 must travel **inside** the `aadl` object — a flat `account.codeloc`, like the retired
-`aadlNumber` shorthand, answers `400 ERR_VALIDATION` with "account must contain exactly
-one identifier".
+`aadlNumber` shorthand, is not one of the keys the identifier gate accepts and answers
+`400 ERR_VALIDATION`.
 
 There is no second AADL method. The `billnum`/`amount` pair earlier versions of this SDK
 accepted is gone from the contract, and `AadlAccount` no longer compiles with it. The
@@ -428,13 +507,116 @@ avis per file at a time, with every unpaid earlier period folded into it —
 `breakdown.unpaidPeriods` says how many — and AADL publishes no per-period invoice behind
 that total. So a discovery returns one payable entry however far behind the tenant is,
 none of it is separately payable, and there is no bill to pick: the multi-bill screen you
-built for SONELGAZ will render a list of one, forever. Show the total, and pay it whole.
+built for SEAAL will render a list of one, forever. Show the total, and pay it whole.
+
+### SEAAL is a pair, not a key
+
+```ts
+{
+  seaal: {
+    code_client: '471135',
+    code_contrat: '446547',
+  },
+} // the only SEAAL account shape there is
+```
+
+Both halves are mandatory, and both are printed on the customer's paper water bill.
+`code_client` is 2 to 6 alphanumeric characters (`^[A-Za-z0-9]{2,6}$`), `code_contrat` is
+2 to 10 digits (`^\d{2,10}$`), and the messages name which one you got wrong:
+"seaal.code_client must be 2 to 6 alphanumeric characters", "seaal.code_contrat must be 2
+to 10 digits".
+
+There is no flat shorthand and no single key to fall back to — the portal authenticates
+on the **pair**, so neither `reference` nor `electronic_payment_key` reaches SEAAL,
+whatever earlier versions of this README said. The _response_ does echo flat, as
+`codeClient`:
+
+```ts
+const ref = newRef('seaal-order-1');
+
+const { transactionId } = await client.bills.discover({
+  partner: 'SEAAL',
+  account: { seaal: { code_client: '471135', code_contrat: '446547' } },
+  ref,
+});
+
+const discovered = await client.bills.waitForReady(transactionId);
+discovered.account; // { codeClient: '471135' } — flat, and not `reference`
+
+// A SEAAL billId is the invoice number itself: 'F059107046'. Pay one, or pay the lot.
+const ids = (discovered.bills ?? []).map((b) => b.billId);
+if (ids.length) await client.bills.pay({ transactionId, billIds: ids, ref: payRefFor(ref) });
+```
+
+**A water account commonly owes many quarters at once.** SEAAL is the platform's first
+partner whose discovery routinely returns a long list — one facture per quarter, and an
+account verified in production had 45 of them outstanding. This is the partner a picker
+screen was invented for, and the partner
+[`billIds`](#paying-several-bills-in-one-order) exists for: the selection settles as one
+portal order and one card payment, with **one fee on the combined total**.
+
+Pay them one at a time and it costs twice over. The fee floor is charged per order, so
+five quarters settled separately cost 150.00 in fees against 30.00 for the same five
+together. And the account-level double-pay guard is keyed on `code_client` with a 24-hour
+window, so a second discovery on that account inside the window — after one quarter has
+settled — answers `409 BILL_ALREADY_PAID` rather than listing what is left. One order is
+not a convenience here; it is how an arrears list gets cleared in one sitting.
+
+**The fee rule is 0.5 percent, floored at 30 DZD and capped at 60 DZD** —
+`fee = min(60, max(30, total × 0.5 / 100))`, computed on the **selected total**, once per
+order. A few hundred dinars never clears the floor, so in practice a SEAAL order under
+6000.00 is charged exactly 30.00 however many factures it carries. The platform publishes
+the rule on its status route as `fee_rule` (`{ percent, min, max }`); this SDK does not
+model that field, which is another reason to read the `fee` the transaction reports rather
+than recompute it. Sandbox still answers `fee: 0`.
+
+Three SEAAL behaviours are worth handling before a customer meets one:
+
+- **There is a 200 DZD minimum order**, and it applies to the selected **total** — so two
+  factures that are each under it can still be payable together. A smaller total is
+  refused by the portal rather than by `/v3`, and reaches you as a `500`. Check the total
+  before you send it, rather than explaining that answer afterwards.
+- **An account can lock itself out, temporarily.** Repeated attempts on one account
+  answer "Compte temporairement bloqué. Réessayez dans 4 heure(s)." Internally that is
+  `UPSTREAM_UNAVAILABLE`, but **`/v3` never shows you that code**: the platform maps it to
+  `PARTNER_UNAVAILABLE`, with its own generic sentence in place of the portal's, so it
+  reaches you either as a `503` (`BillPayUnavailableError`) or — more often, since
+  discovery is asynchronous — as a `FAILED` transaction whose `error.code` is
+  `PARTNER_UNAVAILABLE`. A real portal outage arrives identically, and on this surface the
+  two are indistinguishable. So say "temporarily unavailable, try again later", never
+  "your codes are wrong", and do not hammer it: if it _is_ a lockout, more attempts
+  lengthen it.
+- **"Vous êtes à jour, merci pour votre fidélité." is a result, not a failure.** It means
+  the account is fully settled. At **discovery** that is `READY` with an empty `bills`
+  array, in production exactly as in sandbox — an empty list, never an error. The
+  `BILL_ALREADY_PAID` classification belongs to the **payment** path, and to the
+  account-level double-pay guard that can refuse a discovery with `409` when this account
+  settled something inside the dedupe window. Either way your order owes nothing.
+
+Two smaller ones. The portal answers "Veuillez vérifier vos informations." to a bad
+captcha and to bad credentials alike, so the platform retries before blaming the account
+— an `INVALID_ACCOUNT` from SEAAL has already survived that retry and is worth showing to
+the customer. And reconciliation is by **absence**: a paid facture simply stops being
+returned in the unpaid list, so there is no per-bill "paid" flag to read.
+
+**A SEAAL `billId` _is_ the invoice number.** Discovery returns `numero_fac` —
+`'F059107046'` — and that same string is what `pay()` takes, so there is no lookup table
+between the two calls. `period` reads as the customer's quarter, `'1er trimestre 2026'`.
+The portal's own record carries more around it — `periodRaw`, `serviceType`, `cadence`,
+`invoiceDate`, `dueDate`, `idtfac`, `issuer` — none of which `Bill` models today. Both of
+those are **production** shapes: the sandbox mints synthetic `billId`s and shorter period
+labels, so treat `billId` as an opaque string you round-trip rather than one you parse.
+
+On a settled SEAAL payment the receipt carries the biller's own reference, the "Numéro
+d'opération SEAAL" (`a872b67ebc`), beside SATIM's "Numéro de transaction" and "Numéro
+d'autorisation" — a real one reads: bill `F059107046`, 1er trimestre 2026, 327.00 DA,
+operation `a872b67ebc`, authorisation `843986`.
 
 ### Availability is a runtime fact, not a documented one
 
 ```ts
 const partners = await client.partners(); // GET /v3/bills/partners
-// { ADE: { status: 'ACTIVE' }, AADL: { status: 'ACTIVE' }, SEAAL: { status: 'UNAVAILABLE' }, … }
+// { ADE: { status: 'ACTIVE' }, AADL: { status: 'ACTIVE' }, SEAAL: { status: 'ACTIVE' }, … }
 ```
 
 This map is the only honest answer to "can I offer this biller today?". Availability
@@ -567,7 +749,7 @@ scenario is deterministic.
 | Scenario                  | Partner         | Account                                   | Outcome                                                |
 | ------------------------- | --------------- | ----------------------------------------- | ------------------------------------------------------ |
 | Happy path                | ADE             | `reference: 0123456789012345678901234`    | `READY`, 1 bill @ 443.39 → `SUCCESS`                   |
-| Multi-bill                | SONELGAZ        | `sonelgaz{invoice_number: 9876543210, …}` | `READY`, 2 bills → `SUCCESS`                           |
+| Two bills discovered      | SONELGAZ        | `sonelgaz{invoice_number: 9876543210, …}` | `READY`, 2 bills → `SUCCESS`                           |
 | Nothing due               | ADE             | `reference: 0123456789012340000000002`    | `READY`, `bills: []`                                   |
 | Below the 200 DZD floor   | ADE             | `reference: 0123456789012341111111111`    | `READY`, `bills: []`                                   |
 | Declined                  | ADE             | `reference: 0123456789012340000000004`    | `FAILED` / `PAYMENT_DECLINED`                          |
@@ -581,11 +763,26 @@ scenario is deterministic.
 | AADL, arrears folded in   | AADL            | `aadl{codeloc: 2223334445}`               | `READY`, 1 avis @ 12000.00, `unpaidPeriods: 2`         |
 | AADL, nothing due         | AADL            | `aadl{codeloc: 3334445556}`               | `READY`, `bills: []`                                   |
 | AADL, already settled     | AADL            | `aadl{codeloc: 4445556667}`               | `409 BILL_ALREADY_PAID`                                |
+| SEAAL, many quarters      | SEAAL           | `seaal{code_client: 100001, …}`           | `READY`, 5 unpaid quarterly factures                   |
+| SEAAL, one facture        | SEAAL           | `seaal{code_client: 100002, …}`           | `READY`, 1 facture                                     |
+| SEAAL, nothing due        | SEAAL           | `seaal{code_client: 100003, …}`           | `READY`, `bills: []`                                   |
+| SEAAL, declined           | SEAAL           | `seaal{code_client: 100004, …}`           | `READY` → `FAILED` / `PAYMENT_DECLINED`                |
+| SEAAL, pair rejected      | SEAAL           | `seaal{code_client: 100005, …}`           | `400 INVALID_ACCOUNT`                                  |
 | Anything else well-formed | any available   | anything not listed                       | `READY`, 1 bill @ 500.00 → `SUCCESS`                   |
+
+The SEAAL scenario is keyed off **`code_client`** alone; send any `code_contrat` that
+satisfies `^\d{2,10}$` beside it — the pair is still required, as it is in production.
+`100001` is the signature multi-bill shape, and `100005` is the portal refusing the pair
+itself: a synchronous `400` saying "The portal rejected this SEAAL account".
 
 Two practicalities. **Every `ref` must be fresh per run**, or the second run of a suite
 fails on `DUPLICATED_REF` — `newRef()` exists for this. And **sandbox returns `fee: 0`**,
 so `total === amount` here and only here.
+
+A `billIds` order is assembled in sandbox exactly as it is in production — the same
+aggregate, one fee on the selected total, `selectedBill.billId` the first id you sent — so
+the shape you validate here is the shape production will charge. Only the fee's own value
+differs, and it differs for single bills too.
 
 ---
 
@@ -636,9 +833,11 @@ And from the published guides and reference, each of these checked live:
   ref on a pay answers `403 DUPLICATED_REF`; the deployment accepts it and answers
   `200 PROCESSING`. `payRefFor()` keeps you on the documented side either way.
 - **The sandbox guide says AADL is switched off.** That note is stale: AADL is `ACTIVE`
-  and its scenarios are reachable. `SEAAL` is the partner currently answering
-  `503 PARTNER_UNAVAILABLE` for every identifier. Neither statement is one to build on —
-  read `client.partners()` at runtime.
+  and its scenarios are reachable. Earlier versions of this README said the same of
+  `SEAAL` — that it answered `503 PARTNER_UNAVAILABLE` for every identifier — and that
+  was stale too: SEAAL is integrated, `ACTIVE` at about 194 ms, and has settled real
+  payments. Neither kind of statement is one to build on, including when it is this
+  document making it — read `client.partners()` at runtime.
 - **`fee` is `0` in sandbox.** So `total === amount` there, and an integration that
   charges `amount` will look right until the day it does not.
 - **`meta` is not always sent.** `GET /v3/validate` answers with `success` and `data`

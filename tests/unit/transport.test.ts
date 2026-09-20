@@ -257,6 +257,79 @@ describe('request headers and body', () => {
       ref: 'order-7-pay-abc',
     });
   });
+
+  it('serialises a single-bill payment byte for byte as it always has', async () => {
+    // The regression guard for `billIds`. Adding a second way to name the bills is only
+    // safe if the first way is untouched on the wire, and "untouched" has to mean the
+    // bytes: a body assembled by spreading one branch of a union could pick up a
+    // `billIds: undefined` key, or reorder the three it already had, and `toEqual`
+    // above would go on passing through either.
+    const { c, s } = mk([{ json: ok({ transactionId: TXN_ID, status: 'PROCESSING' }) }]);
+    await c.bills.pay({ transactionId: TXN_ID, billId: 'bill-1', ref: 'order-7-pay-abc' });
+
+    expect(JSON.stringify(s.calls[0]!.body)).toBe(
+      `{"transactionId":"${TXN_ID}","billId":"bill-1","ref":"order-7-pay-abc"}`,
+    );
+  });
+
+  it('posts a multi-bill payment as exactly transactionId, billIds and ref', async () => {
+    // Three SEAAL quarters as one order. The array travels in the order it was given —
+    // the first id is the one the settled transaction reports back as `selectedBill`.
+    const { c, s } = mk([{ json: ok({ transactionId: TXN_ID, status: 'PROCESSING' }) }]);
+    await c.bills.pay({
+      transactionId: TXN_ID,
+      billIds: ['F059107046', 'F059107047', 'F059107048'],
+      ref: 'order-7-pay-abc',
+    });
+
+    expect(s.calls[0]!.body).toEqual({
+      transactionId: TXN_ID,
+      billIds: ['F059107046', 'F059107047', 'F059107048'],
+      ref: 'order-7-pay-abc',
+    });
+    expect(JSON.stringify(s.calls[0]!.body)).toBe(
+      `{"transactionId":"${TXN_ID}",` +
+        `"billIds":["F059107046","F059107047","F059107048"],` +
+        `"ref":"order-7-pay-abc"}`,
+    );
+  });
+
+  it('sends the key the caller used and never the other one', async () => {
+    // Not cosmetic: the two are mutually exclusive upstream, and a `billId: null` or a
+    // `billIds: []` added for symmetry would turn every payment into
+    // `400 ERR_VALIDATION` — "Provide exactly one of billId or billIds".
+    const { c, s } = mk([{ json: ok({ transactionId: TXN_ID, status: 'PROCESSING' }) }]);
+
+    await c.bills.pay({ transactionId: TXN_ID, billId: 'bill-1', ref: 'p1' });
+    await c.bills.pay({ transactionId: TXN_ID, billIds: ['bill-1'], ref: 'p2' });
+
+    expect(Object.keys(s.calls[0]!.body as object)).toEqual(['transactionId', 'billId', 'ref']);
+    expect(Object.keys(s.calls[1]!.body as object)).toEqual(['transactionId', 'billIds', 'ref']);
+  });
+
+  it('sends a single id as billIds when that is how it was given', async () => {
+    // One bill is one order either way, so the array form with one entry is equivalent
+    // rather than special — and it is what a picker with one checkbox ticked produces.
+    const { c, s } = mk([{ json: ok({ transactionId: TXN_ID, status: 'PROCESSING' }) }]);
+    await c.bills.pay({ transactionId: TXN_ID, billIds: ['F059107046'], ref: 'p' });
+
+    expect(s.calls[0]!.body).toEqual({
+      transactionId: TXN_ID,
+      billIds: ['F059107046'],
+      ref: 'p',
+    });
+  });
+
+  it('treats an explicit billIds: undefined as the single form, not as both', async () => {
+    // What a caller spreading an optional selection into the object literal produces.
+    // `exactOptionalPropertyTypes` is off, so the type permits it; the body must not
+    // carry the key, because `JSON.stringify` dropping it is not something to rely on
+    // for a field the API would reject.
+    const { c, s } = mk([{ json: ok({ transactionId: TXN_ID, status: 'PROCESSING' }) }]);
+    await c.bills.pay({ transactionId: TXN_ID, billId: 'bill-1', billIds: undefined, ref: 'p' });
+
+    expect(Object.keys(s.calls[0]!.body as object)).toEqual(['transactionId', 'billId', 'ref']);
+  });
 });
 
 describe('envelope handling', () => {

@@ -46,6 +46,28 @@ const assertRef = (ref: string, field = 'ref'): void => {
   }
 };
 
+/**
+ * The one selection the payment will carry, and the caller's rather than ours.
+ *
+ * {@link PayParams} already makes "both" and "neither" compile errors, so this guard is
+ * for the JavaScript caller the types never reach. It matters more than the other two
+ * guards do: `billId` and `billIds` are mutually exclusive on the wire, so an SDK that
+ * quietly picked one of a contradictory pair would settle a selection nobody asked for,
+ * with money behind it. Refusing in the server's own words is the honest answer.
+ *
+ * Nothing else about the selection is checked here. An empty array, a fifty-first id, a
+ * repeated one — each is refused by the API with a sentence that names the problem, and
+ * a limit copied into the SDK is a limit that goes stale on the day the server relaxes it.
+ */
+const billSelection = (params: PayParams): { billId: string } | { billIds: string[] } => {
+  if ((params.billId === undefined) === (params.billIds === undefined)) {
+    throw new BillPayValidationError('Provide exactly one of billId or billIds.', {
+      code: 'ERR_VALIDATION',
+    });
+  }
+  return params.billIds === undefined ? { billId: params.billId } : { billIds: params.billIds };
+};
+
 const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
   new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(new BillPayAbortError());
@@ -102,7 +124,23 @@ export class BillsResource {
   }
 
   /**
-   * Pay one discovered bill. `POST /v3/bills/pay`.
+   * Pay one discovered bill, or several of them as one order. `POST /v3/bills/pay`.
+   *
+   * Name the bills one way or the other — `billId` for a single bill,
+   * {@link MultiBillPayParams `billIds`} for a selection — and only the key you used is
+   * sent. Both together, or neither, is refused: by the compiler if you have types, and
+   * by this method before a request is spent if you do not.
+   *
+   * ```ts
+   * await client.bills.pay({ transactionId, billIds: ids, ref: payRefFor(discoveryRef) });
+   * ```
+   *
+   * A selection settles as **one portal order and one card payment**, so it is charged
+   * one fee on the combined total rather than one fee per bill — with SEAAL's 30 DZD
+   * floor that is 30.00 for five factures instead of 150.00, which is the whole point of
+   * the form. Every id has to be on the transaction or none of them is paid, and the
+   * settled transaction reports the aggregate: read `total`, and keep your own list of
+   * the ids you sent.
    *
    * Give the payment its own `ref` — `payRefFor(discoveryRef)` derives one. The docs
    * describe that as mandatory and promise `403 DUPLICATED_REF` for the discovery ref;
@@ -119,10 +157,11 @@ export class BillsResource {
   async pay(params: PayParams, signal?: AbortSignal): Promise<PayAck> {
     assertTransactionId(params.transactionId);
     assertRef(params.ref);
+    const selection = billSelection(params);
     const { data } = await this.transport.request<PayAck>({
       method: 'POST',
       path: '/v3/bills/pay',
-      body: { transactionId: params.transactionId, billId: params.billId, ref: params.ref },
+      body: { transactionId: params.transactionId, ...selection, ref: params.ref },
       signal,
     });
     return data;

@@ -20,7 +20,11 @@ import {
   type AadlAccount,
   type AccountIdentifier,
   type DiscoverParams,
+  type MultiBillPayParams,
   type Partner,
+  type PayParams,
+  type SeaalAccount,
+  type SingleBillPayParams,
 } from '../../src/index.js';
 import { aadlTxn, ok, stubFetch, TXN_ID, txn } from './helpers.js';
 
@@ -461,6 +465,90 @@ describe('AADL takes a codeloc and nothing else', () => {
   });
 });
 
+describe('SEAAL takes a code_client and a code_contrat, both of them', () => {
+  it('accepts the one documented shape', () => {
+    const account: SeaalAccount = { seaal: { code_client: '471135', code_contrat: '446547' } };
+    const widened: AccountIdentifier = account;
+
+    expect(widened).toEqual({ seaal: { code_client: '471135', code_contrat: '446547' } });
+  });
+
+  it('sends both halves nested inside seaal, exactly as given', async () => {
+    const { c, s } = discovering();
+    await c.bills.discover({
+      partner: 'SEAAL',
+      account: { seaal: { code_client: '0A12b3', code_contrat: '0044654' } },
+      ref: 'seaal-1',
+    });
+
+    // Both halves travel as strings and neither is normalised: `code_client` is
+    // alphanumeric, so it was never a number, and `code_contrat` is a string of digits
+    // whose leading zeros are part of the value. They are copied off the customer's
+    // paper water bill, and what they typed is what the portal judges.
+    expect(s.calls[0]!.body).toMatchObject({
+      account: { seaal: { code_client: '0A12b3', code_contrat: '0044654' } },
+    });
+  });
+
+  it('rejects a seaal object carrying only code_client at compile time', () => {
+    // @ts-expect-error — the portal authenticates on the PAIR, so half of it is not an
+    // account. The other half missing is "seaal.code_contrat must be 2 to 10 digits".
+    const bad: SeaalAccount = { seaal: { code_client: '471135' } };
+    expect(bad).toBeDefined();
+  });
+
+  it('rejects a seaal object carrying only code_contrat at compile time', () => {
+    // @ts-expect-error — "seaal.code_client must be 2 to 6 alphanumeric characters".
+    const bad: SeaalAccount = { seaal: { code_contrat: '446547' } };
+    expect(bad).toBeDefined();
+  });
+
+  it('rejects a numeric code_contrat at compile time', () => {
+    // @ts-expect-error — 2 to 10 digits as a string, not a quantity: leading zeros matter.
+    const bad: SeaalAccount = { seaal: { code_client: '471135', code_contrat: 446547 } };
+    expect(bad).toBeDefined();
+  });
+
+  it('rejects a third field inside seaal at compile time', () => {
+    const bad: SeaalAccount = {
+      // @ts-expect-error — the pair is the whole identifier; there is no third part to
+      // it. The directive sits on the property rather than above the declaration because
+      // that is the line TypeScript reports an excess nested key on.
+      seaal: { code_client: '471135', code_contrat: '446547', code_agence: '16' },
+    };
+    expect(bad).toBeDefined();
+  });
+
+  it('rejects the flat codeClient echo as a request identifier at compile time', () => {
+    // @ts-expect-error — `codeClient` is what comes *back*. Nothing flat goes out: SEAAL
+    // has no single key that identifies an account, which is the whole reason the
+    // request form is a nested pair rather than a shorthand like `reference`.
+    const bad: AccountIdentifier = { codeClient: '471135' };
+    expect(bad).toBeDefined();
+  });
+
+  it('echoes the identifier back flat, as codeClient rather than reference', async () => {
+    // The same asymmetry as `aadl{}` → `codeloc`: the pair goes out nested and a single
+    // flat key comes home. Worth pinning because `reference` is the key a reader expects
+    // here — that one is ADE's, and SEAAL has never used it.
+    //
+    // The body below is the fully settled account: READY with an empty `bills`, which is
+    // a result rather than a failure. The water bill is paid; there is nothing to pick.
+    const s = stubFetch([
+      {
+        json: ok(
+          txn({ status: 'READY', partner: 'SEAAL', account: { codeClient: '471135' }, bills: [] }),
+        ),
+      },
+    ]);
+    const c = new BillPayClient({ apiKey: 'k', baseUrl: 'http://api.test', fetch: s.fetch });
+
+    const t = await c.bills.get(TXN_ID);
+    expect(t.account).toEqual({ codeClient: '471135' });
+    expect(t.bills).toEqual([]);
+  });
+});
+
 describe('account identifier union', () => {
   it('accepts each valid single-identifier form', async () => {
     const accounts: AccountIdentifier[] = [
@@ -472,9 +560,10 @@ describe('account identifier union', () => {
       { sonelgaz: { invoice_number: '9876543210', amount_without_stamp: '15000', ebb_key: 'ABC' } },
       { ade: { sub_id: '000123456789', period: '07/2026', amount: '12000', pay_key: '1234567' } },
       { aadl: { codeloc: '1112223334' } },
+      { seaal: { code_client: '471135', code_contrat: '446547' } },
     ];
 
-    expect(accounts).toHaveLength(8);
+    expect(accounts).toHaveLength(9);
 
     for (const account of accounts) {
       const { c, s } = discovering();
@@ -511,6 +600,46 @@ describe('account identifier union', () => {
     expect(bad).toBeDefined();
   });
 
+  it('rejects a SEAAL pair combined with a flat reference at compile time', () => {
+    // @ts-expect-error — `seaal` and `reference` are different slots, and one is the
+    // limit. The pairing is worth its own case because `reference` is precisely the key
+    // SEAAL was wrongly documented as using, so it is the one a caller reaches for.
+    const bad: AccountIdentifier = {
+      reference: '0123456789012345678901234',
+      seaal: { code_client: '471135', code_contrat: '446547' },
+    };
+    expect(bad).toBeDefined();
+  });
+
+  it('rejects a SEAAL pair beside an AADL codeloc at compile time', () => {
+    // @ts-expect-error — two nested forms, and only one slot may be filled.
+    const bad: AccountIdentifier = {
+      seaal: { code_client: '471135', code_contrat: '446547' },
+      aadl: { codeloc: '1112223334' },
+    };
+    expect(bad).toBeDefined();
+  });
+
+  it('rejects a widened object carrying seaal alongside another identifier', () => {
+    // The load-bearing one, and the reason it does not look like its neighbours.
+    //
+    // Every other negative here is a fresh object literal, so TypeScript's excess
+    // property check refuses it whatever the union says underneath — which means they
+    // all keep passing even if `seaal` were added to `AccountIdentifier` without being
+    // added to `AccountKey`. A variable is not fresh: assigning one tests assignability
+    // alone, and assignability is the only thing `Only<>` speaks to. Leave `'seaal'`
+    // out of `AccountKey` and no member pins `seaal?: never`, two identifiers start
+    // type-checking in every non-literal position, and this line is what notices.
+    const twoIdentifiers = {
+      reference: '0123456789012345678901234',
+      seaal: { code_client: '471135', code_contrat: '446547' },
+    };
+
+    // @ts-expect-error — exactly one identifier is allowed, freshness or no freshness.
+    const bad: AccountIdentifier = twoIdentifiers;
+    expect(bad).toBeDefined();
+  });
+
   it('rejects an AADL identifier paired with a landline at compile time', () => {
     // @ts-expect-error — one slot, whichever two the caller happens to have to hand.
     const bad: AccountIdentifier = { aadl: { codeloc: '1112223334' }, phoneNumber: '023456789' };
@@ -539,6 +668,105 @@ describe('account identifier union', () => {
     // @ts-expect-error — all three SONELGAZ invoice fields are required.
     const bad: AccountIdentifier = { sonelgaz: { invoice_number: '9876543210' } };
     expect(bad).toBeDefined();
+  });
+});
+
+describe('pay names one bill or a list of them, never both and never neither', () => {
+  it('accepts the single form', () => {
+    const one: SingleBillPayParams = { transactionId: TXN_ID, billId: 'F059107046', ref: 'p' };
+    const widened: PayParams = one;
+
+    expect(widened).toEqual({ transactionId: TXN_ID, billId: 'F059107046', ref: 'p' });
+  });
+
+  it('accepts the array form', () => {
+    const many: MultiBillPayParams = {
+      transactionId: TXN_ID,
+      billIds: ['F059107046', 'F059107047'],
+      ref: 'p',
+    };
+    const widened: PayParams = many;
+
+    expect(widened).toEqual({
+      transactionId: TXN_ID,
+      billIds: ['F059107046', 'F059107047'],
+      ref: 'p',
+    });
+  });
+
+  it('rejects both at compile time', () => {
+    // The combination the API answers `400 ERR_VALIDATION` to — "Provide exactly one of
+    // billId or billIds". A caller who migrates a picker to the array form and leaves
+    // the old field behind writes exactly this.
+    // @ts-expect-error — exactly one selection, never two.
+    const bad: PayParams = {
+      transactionId: TXN_ID,
+      billId: 'F059107046',
+      billIds: ['F059107046'],
+      ref: 'p',
+    };
+    expect(bad).toBeDefined();
+  });
+
+  it('rejects neither at compile time', () => {
+    // @ts-expect-error — zero selections is as invalid as two: a payment has to say what
+    // it is paying.
+    const bad: PayParams = { transactionId: TXN_ID, ref: 'p' };
+    expect(bad).toBeDefined();
+  });
+
+  it('rejects a widened object carrying both, not just a fresh literal', () => {
+    // The load-bearing one, for the same reason as its twin in the account union above.
+    // Every other negative here is a fresh object literal, which excess property
+    // checking refuses whatever the union says underneath — so they would all keep
+    // passing if `billIds?: never` were dropped from `SingleBillPayParams`. A variable
+    // is not fresh: assigning one tests assignability alone, which is the only thing
+    // those `never`s speak to.
+    const bothSelections = {
+      transactionId: TXN_ID,
+      billId: 'F059107046',
+      billIds: ['F059107047'],
+      ref: 'p',
+    };
+
+    // @ts-expect-error — exactly one selection, freshness or no freshness.
+    const bad: PayParams = bothSelections;
+    expect(bad).toBeDefined();
+  });
+
+  it('rejects a bare string in place of the array at compile time', () => {
+    // @ts-expect-error — `billIds` is a list even when the customer picked one facture.
+    const bad: PayParams = { transactionId: TXN_ID, billIds: 'F059107046', ref: 'p' };
+    expect(bad).toBeDefined();
+  });
+
+  it('rejects an array in place of the single id at compile time', () => {
+    // @ts-expect-error — `billId` is the one-bill form; a list goes in `billIds`.
+    const bad: PayParams = { transactionId: TXN_ID, billId: ['F059107046'], ref: 'p' };
+    expect(bad).toBeDefined();
+  });
+
+  it('still requires a ref on the array form', () => {
+    // @ts-expect-error — `ref` is required on every payment, whichever selection it names.
+    const bad: PayParams = { transactionId: TXN_ID, billIds: ['F059107046'] };
+    expect(bad).toBeDefined();
+  });
+
+  it('keeps every existing single-bill call site compiling unchanged', async () => {
+    // `PayParams` went from an interface to a union in 0.5.0. That is a source-level
+    // change to a published type, so the shape partners already wrote has to keep
+    // type-checking and keep reaching the wire untouched.
+    const s = stubFetch([{ json: ok({ transactionId: TXN_ID, status: 'PROCESSING' }) }]);
+    const c = new BillPayClient({ apiKey: 'k', baseUrl: 'http://api.test', fetch: s.fetch });
+
+    const params: PayParams = { transactionId: TXN_ID, billId: 'F059107046', ref: 'p' };
+    await c.bills.pay(params);
+
+    expect(s.calls[0]!.body).toEqual({
+      transactionId: TXN_ID,
+      billId: 'F059107046',
+      ref: 'p',
+    });
   });
 });
 

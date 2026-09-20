@@ -18,6 +18,7 @@ import {
   BillPayValidationError,
   isTerminal,
   TERMINAL_STATUSES,
+  type PayParams,
   type TransactionStatus,
 } from '../../src/index.js';
 import { err, ok, settled, stubFetch, TXN_ID, txn } from './helpers.js';
@@ -548,6 +549,50 @@ describe('input guards', () => {
       c.bills.pay({ transactionId: 'not-hex', billId: 'b1', ref: 'r' }),
     ).rejects.toBeInstanceOf(BillPayValidationError);
     expect(s.calls).toHaveLength(0);
+  });
+
+  it('refuses a pay that names both billId and billIds, rather than choosing one', async () => {
+    const s = stubFetch([{ json: ok({ transactionId: TXN_ID, status: 'PROCESSING' }) }]);
+    const c = new BillPayClient({ apiKey: 'k', baseUrl: 'http://api.test', fetch: s.fetch });
+
+    // The type forbids this; a JavaScript caller is not bound by the type. The two keys
+    // are mutually exclusive upstream, so picking one of them here would settle a
+    // selection nobody asked for — with money behind it. The cast is through `unknown`
+    // because the shape is not even comparable to `PayParams`, which is the point.
+    const both = {
+      transactionId: TXN_ID,
+      billId: 'F059107046',
+      billIds: ['F059107047'],
+      ref: 'r',
+    } as unknown as PayParams;
+
+    const e = (await c.bills.pay(both).catch((x: unknown) => x)) as BillPayValidationError;
+    expect(e).toBeInstanceOf(BillPayValidationError);
+    expect(e.code).toBe('ERR_VALIDATION');
+    expect(e.message).toContain('exactly one of billId or billIds');
+    expect(s.calls).toHaveLength(0);
+  });
+
+  it('refuses a pay that names no bill at all', async () => {
+    const s = stubFetch([{ json: ok({ transactionId: TXN_ID, status: 'PROCESSING' }) }]);
+    const c = new BillPayClient({ apiKey: 'k', baseUrl: 'http://api.test', fetch: s.fetch });
+
+    const neither = { transactionId: TXN_ID, ref: 'r' } as unknown as PayParams;
+
+    await expect(c.bills.pay(neither)).rejects.toBeInstanceOf(BillPayValidationError);
+    expect(s.calls).toHaveLength(0);
+  });
+
+  it('leaves the rest of the selection to the API, which names the problem', async () => {
+    // An empty array is refused upstream, not here: `billIds` is 1 to 50 unique ids and
+    // the server says which rule was broken. A limit copied into the SDK is a limit that
+    // goes stale the day the server relaxes it, so only the mutually-exclusive pair —
+    // where the SDK would otherwise have to choose — is caught locally.
+    const s = stubFetch([{ json: ok({ transactionId: TXN_ID, status: 'PROCESSING' }) }]);
+    const c = new BillPayClient({ apiKey: 'k', baseUrl: 'http://api.test', fetch: s.fetch });
+
+    await c.bills.pay({ transactionId: TXN_ID, billIds: [], ref: 'r' });
+    expect(s.calls[0]!.body).toEqual({ transactionId: TXN_ID, billIds: [], ref: 'r' });
   });
 
   it('rejects a blank ref on getByRef, which would otherwise fetch the whole list', async () => {

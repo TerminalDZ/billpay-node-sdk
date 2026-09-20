@@ -147,14 +147,15 @@ describe('partners', () => {
       ADE: { status: 'ACTIVE' },
       AADL: { status: 'ACTIVE' },
       SONELGAZ: { status: 'ACTIVE' },
-      SEAAL: { status: 'UNAVAILABLE' },
+      SEAAL: { status: 'ACTIVE' },
       'Algérie Télécom': { status: 'ACTIVE' },
     };
     const { c } = mk([{ json: ok(map) }]);
 
-    // Verbatim, including the unavailable one: filtering here would hide the reason a
+    // Verbatim, whatever the statuses are: filtering here would hide the reason a
     // partner is missing from the picker, and the SDK has no business having an opinion
-    // about which billers are switched on today.
+    // about which billers are switched on today. The map above is a fixture and not a
+    // roster — a status only means anything at the moment the server sent it.
     expect(await c.partners()).toEqual(map);
   });
 
@@ -168,10 +169,15 @@ describe('partners', () => {
   });
 
   it('reports an unavailable partner as unavailable, and not as an error', async () => {
-    const { c } = mk([{ json: ok({ SEAAL: { status: 'UNAVAILABLE' } }) }]);
+    // The name is deliberately not one of the five. Which biller is off changes without
+    // an SDK release, so a fixture that names a real one is read as a report however it
+    // is commented — this test used to pin SEAAL as *the* unavailable partner, and SEAAL
+    // has been ACTIVE since it went live. What is under test is that UNAVAILABLE comes
+    // back as a value to render, not as an exception to catch.
+    const { c } = mk([{ json: ok({ OFFLINEBILLER: { status: 'UNAVAILABLE' } }) }]);
     const map = await c.partners();
 
-    expect(map['SEAAL']?.status).toBe('UNAVAILABLE');
+    expect(map['OFFLINEBILLER']?.status).toBe('UNAVAILABLE');
   });
 
   it('returns an empty map without inventing a roster to fill it', async () => {
