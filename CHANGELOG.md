@@ -3,6 +3,13 @@
 All notable changes to `@terminaldz/billpay-sdk`. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.7.0 — 2026-09-20
+
+### Breaking
+
+- **`AadlAccount` is exactly `{ aadl: { codeloc } }`.** The optional `billnum`/`amount`
+  pair added in 0.6.0 is removed: AADL is addressed one way, by housing file number.
+
 ## 0.6.0 — 2026-09-20
 
 Aligns the SDK with the API's identifier contract and the current sandbox behaviour.
@@ -22,7 +29,6 @@ Aligns the SDK with the API's identifier contract and the current sandbox behavi
 
 ### Changed
 
-- `AadlAccount` accepts `billnum` and `amount` together (DIRECT mode).
 - `Transaction.selectedBills` is typed: the itemised bills of a multi-bill order.
 - Documentation follows the deployment: the pay ref must differ from the discovery ref
   (`403 DUPLICATED_REF`); `list()` rows carry `bills`, `selectedBills` and `error`;

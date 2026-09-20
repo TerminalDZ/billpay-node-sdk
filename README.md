@@ -66,7 +66,7 @@ returns `'SANDBOX'` or `'PRODUCTION'`.
 | `ADE`             | `{ electronic_payment_key }` — 25 characters                      |
 | `SONELGAZ`        | `{ sonelgaz: { invoice_number, amount_without_stamp, ebb_key } }` |
 | `SEAAL`           | `{ seaal: { code_client, code_contrat } }`                        |
-| `AADL`            | `{ aadl: { codeloc, billnum?, amount? } }`                        |
+| `AADL`            | `{ aadl: { codeloc } }` — 6–20 digits                             |
 | `Algérie Télécom` | `{ phone_number }` — landline, `0[2-4]` then 7 digits             |
 
 Responses echo the identifier flat under a partner-specific key (`reference`,

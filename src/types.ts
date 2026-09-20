@@ -32,7 +32,7 @@ export type PartnersMap = Record<string, { status: PartnerStatus }>;
  * | `ADE`             | `{ electronic_payment_key }` — 25 characters                     |
  * | `SONELGAZ`        | `{ sonelgaz: { invoice_number, amount_without_stamp, ebb_key } }` |
  * | `SEAAL`           | `{ seaal: { code_client, code_contrat } }`                       |
- * | `AADL`            | `{ aadl: { codeloc, billnum?, amount? } }`                       |
+ * | `AADL`            | `{ aadl: { codeloc } }` — 6–20 digits                            |
  * | `Algérie Télécom` | `{ phone_number }` — landline, `0[2-4]` + 7 digits               |
  *
  * Each member pins the other keys to `never`, so two identifiers are a compile error.
@@ -64,13 +64,10 @@ export type SonelgazAccount = {
 } & Only<'sonelgaz'>;
 
 /**
- * AADL — `codeloc` is the housing file number (6–20 digits). Add `billnum` and `amount`
- * together, as printed on the avis de paiement, to target that exact notice. AADL issues
- * one aggregate notice per file; arrears are included in it and cannot be paid separately.
+ * AADL — `codeloc`, the housing file number (6–20 digits). AADL issues one aggregate
+ * notice per file; arrears are included in it and cannot be paid separately.
  */
-export type AadlAccount = {
-  aadl: { codeloc: string; billnum?: string; amount?: string };
-} & Only<'aadl'>;
+export type AadlAccount = { aadl: { codeloc: string } } & Only<'aadl'>;
 
 /**
  * SEAAL — `code_client` (2–6 alphanumeric) and `code_contrat` (2–10 digits), both

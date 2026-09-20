@@ -391,11 +391,10 @@ describe('AADL takes a codeloc and nothing else', () => {
     });
   });
 
-  it('accepts billnum and amount together (DIRECT mode)', () => {
-    const direct: AadlAccount = {
-      aadl: { codeloc: '1112223334', billnum: '900000001', amount: '5400.00' },
-    };
-    expect(direct.aadl.billnum).toBe('900000001');
+  it('rejects billnum at compile time', () => {
+    // @ts-expect-error — `aadl` carries `codeloc` alone.
+    const bad: AadlAccount = { aadl: { codeloc: '1112223334', billnum: '77' } };
+    expect(bad).toBeDefined();
   });
 
   it('rejects amount at compile time', () => {
@@ -547,11 +546,10 @@ describe('account identifier union', () => {
       { phone_number: '023456789' },
       { sonelgaz: { invoice_number: '9876543210', amount_without_stamp: '15000', ebb_key: 'ABC' } },
       { aadl: { codeloc: '1112223334' } },
-      { aadl: { codeloc: '1112223334', billnum: '900000001', amount: '5400.00' } },
       { seaal: { code_client: '471135', code_contrat: '446547' } },
     ];
 
-    expect(accounts).toHaveLength(6);
+    expect(accounts).toHaveLength(5);
 
     for (const account of accounts) {
       const { c, s } = discovering();
