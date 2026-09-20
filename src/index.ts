@@ -1,9 +1,6 @@
 /**
- * `@terminaldz/billpay-sdk` — the official Node.js SDK for the OneClickDz Bill
- * Payment API (`/v3`).
- *
- * Zero runtime dependencies, and no `node:` imports anywhere in the graph, so the same
- * build serves Node 18+ and the browser.
+ * `@terminaldz/billpay-sdk` — Node.js/TypeScript SDK for the OneClickDz Bill Payment API (`/v3`).
+ * Zero runtime dependencies; no `node:` imports, so the same build runs in Node 18+ and browsers.
  *
  * @see https://docs.oneclickdz.com
  */
@@ -33,13 +30,11 @@ export { PARTNERS, TERMINAL_STATUSES, isTerminal, environmentOf } from './types.
 export type {
   AadlAccount,
   AccountIdentifier,
-  AdeInvoiceAccount,
   ApiEnvironment,
   Avis,
   Bill,
   BillBreakdown,
   BillPayClientOptions,
-  ContractNumberAccount,
   DiscoverAck,
   DiscoverParams,
   ElectronicPaymentKeyAccount,
@@ -56,14 +51,12 @@ export type {
   PayAck,
   PayParams,
   PhoneNumberAccount,
-  PhoneNumberSnakeAccount,
   PollOptions,
   Receipt,
-  ReferenceAccount,
   ResponseMeta,
   SeaalAccount,
   SingleBillPayParams,
-  SonelgazInvoiceAccount,
+  SonelgazAccount,
   SuccessEnvelope,
   SyncErrorCode,
   TerminalErrorCode,

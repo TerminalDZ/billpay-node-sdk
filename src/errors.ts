@@ -24,27 +24,11 @@ export class BillPayError extends Error {
   readonly httpStatus?: number;
   /** Correlation id. Quote this when contacting support. */
   readonly requestId?: string | null;
-  /**
-   * Seconds from `Retry-After`, when the server sent one.
-   *
-   * In practice only `AUTH_UNAVAILABLE` and a rate limit carry it. The other 503s do
-   * not, so an absent value means "back off on your own schedule", not "retry now".
-   */
+  /** Seconds from `Retry-After`, when the server sent one (`AUTH_UNAVAILABLE`, rate limits). */
   readonly retryAfter?: number;
   /** `error.details` from the envelope, when present. */
   readonly details?: unknown;
-  /**
-   * Whether the refusal carried the house envelope — that is, whether it came from the
-   * application or merely from the router in front of it.
-   *
-   * `true` for anything the API itself decided, which is almost everything. `false`
-   * when the request was turned away before it reached the application: an unknown
-   * path, a proxy, a gateway. See {@link isEndpointMissing}, which is the useful
-   * reading of it.
-   *
-   * Local failures — a timeout, an aborted call, a dropped socket — never reached a
-   * server at all and are reported as `false`.
-   */
+  /** Whether the refusal carried the API's error envelope (`false` for router, proxy and local failures). */
   readonly enveloped: boolean;
 
   constructor(
@@ -71,45 +55,16 @@ export class BillPayError extends Error {
   }
 
   /**
-   * Whether this deployment does not serve the endpoint at all.
-   *
-   * A `404` that never reached the application is the router saying "no such path",
-   * which is a different fact from the application saying "no such thing" — and the two
-   * are otherwise indistinguishable, because both arrive as `NOT_FOUND`.
-   *
-   * The distinction is live today on {@link BillsResource.avis}: the endpoint is
-   * documented and implemented here, but is not yet routed in the deployment, so it
-   * answers a router miss. Branch on this and your code needs no edit the day it ships —
-   * `true` means "not available here yet, try again later", while a `NOT_FOUND` with
-   * this `false` is the real answer: the transaction is not yours, is not AADL, or has
-   * not resolved a housing file.
-   *
-   * ```ts
-   * try {
-   *   const avis = await client.bills.avis(transactionId);
-   * } catch (err) {
-   *   if (err instanceof BillPayNotFoundError && err.isEndpointMissing) {
-   *     // Not deployed yet. Offer the receipt instead and check again another day.
-   *   } else if (err instanceof BillPayNotFoundError) {
-   *     // Deployed, and it has told you something: wrong partner, or no avis yet.
-   *   }
-   * }
-   * ```
+   * Whether the `404` came from the router (no such path — the deployment does not serve
+   * the endpoint) rather than from the application (no such thing). Both arrive as `NOT_FOUND`.
    */
   get isEndpointMissing(): boolean {
     return this.httpStatus === 404 && !this.enveloped;
   }
 
   /**
-   * Whether retrying the *same* request could plausibly succeed.
-   *
-   * True for the transient categories only. This describes the error, not the
-   * request: a POST is never safe to retry blindly whatever this says — recover with
-   * `bills.getByRef(...)` instead.
-   *
-   * `SERVICE_UNAVAILABLE` is the trap. It is transient, so this returns `true`, but it
-   * means the bill service did not answer *in time*, not that nothing happened: on a
-   * pay, the payment may well be running. Read the transaction before you resend it.
+   * Whether the same request could plausibly succeed later (transient categories only).
+   * A POST is never retried blindly on this: read the transaction first.
    */
   get isRetryable(): boolean {
     return (
@@ -125,22 +80,8 @@ export class BillPayError extends Error {
 /**
  * The key was refused: `401 MISSING_ACCESS_TOKEN` · `401 INVALID_ACCESS_TOKEN` ·
  * `401 ERR_AUTH` · `403 IP_BLOCKED` · `403 IP_NOT_ALLOWED` · `403 API_DISABLED`.
- *
- * The three 403s are here rather than under {@link BillPayConflictError} because they say
- * something about your key — where it may be used, and whether it is switched on — not
- * about the request. None is worth a retry; the first clears itself and the other two
- * need a change in the dashboard.
- *
- * Note that `503 AUTH_UNAVAILABLE` is **not** here — it means the API could not reach
- * its auth service in time, which says nothing about your key. It maps to
- * {@link BillPayUnavailableError}. Rotating a key in response to it is the reflex to
- * resist: it costs an outage and fixes nothing.
- *
- * Repeated rejections are counted. The API locks a key out after twenty consecutive
- * bad attempts, and the message tells you how many are left — so never loop over
- * candidate keys to find the working one. Spend them all and the next answer is
- * `IP_BLOCKED`: your address, not your key, is what stops being served, for about
- * fifteen minutes. That one is an alert to wake somebody with, not a thing to poll.
+ * Not retryable. `503 AUTH_UNAVAILABLE` is {@link BillPayUnavailableError} instead: it
+ * says nothing about the key.
  */
 export class BillPayAuthError extends BillPayError {}
 
@@ -226,16 +167,9 @@ export class BillPayAbortError extends BillPayError {
 }
 
 /**
- * A polling helper hit its `timeoutMs` before reaching the state it waited for.
- *
- * The transaction is untouched and probably still progressing — read
- * {@link lastStatus} and keep polling if you want to.
- *
- * This is also what you get when the *reads* were what failed. A poller rides out
- * transient refusals rather than abandoning a payment over them, so a run that never
- * managed a successful read still ends here, with `lastStatus` undefined and the last
- * refusal as `cause`. Both endings mean the same thing to your order state — nobody
- * knows yet — which is why they are one error and not two.
+ * A polling helper hit its `timeoutMs`. The transaction is untouched and probably still
+ * progressing: read {@link lastStatus} and keep polling. `lastStatus` is undefined and
+ * `cause` set when transient read failures used up the budget.
  */
 export class BillPayPollTimeoutError extends BillPayError {
   readonly transactionId: string;

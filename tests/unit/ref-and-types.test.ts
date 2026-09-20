@@ -345,7 +345,7 @@ describe('partners', () => {
     const p: DiscoverParams = {
       // @ts-expect-error — 'Algerie Telecom' without accents is not a partner value.
       partner: 'Algerie Telecom',
-      account: { reference: 'a' },
+      account: { electronic_payment_key: 'a' },
       ref: 'r',
     };
     expect(p).toBeDefined();
@@ -354,7 +354,7 @@ describe('partners', () => {
   it('accepts the accented Algérie Télécom value', () => {
     const p: DiscoverParams = {
       partner: 'Algérie Télécom',
-      account: { phoneNumber: '023456789' },
+      account: { phone_number: '023456789' },
       ref: 'r',
     };
     expect(p.partner).toBe('Algérie Télécom');
@@ -391,13 +391,11 @@ describe('AADL takes a codeloc and nothing else', () => {
     });
   });
 
-  it('rejects billnum at compile time', () => {
-    // Removed from the contract. The server's Joi layer strips unknown keys rather than
-    // rejecting them, so sending it still answers 200 and changes nothing — leniency,
-    // not a contract, and not something to let a caller build on.
-    // @ts-expect-error — `aadl` carries `codeloc` alone.
-    const bad: AadlAccount = { aadl: { codeloc: '1112223334', billnum: '77' } };
-    expect(bad).toBeDefined();
+  it('accepts billnum and amount together (DIRECT mode)', () => {
+    const direct: AadlAccount = {
+      aadl: { codeloc: '1112223334', billnum: '900000001', amount: '5400.00' },
+    };
+    expect(direct.aadl.billnum).toBe('900000001');
   });
 
   it('rejects amount at compile time', () => {
@@ -444,8 +442,7 @@ describe('AADL takes a codeloc and nothing else', () => {
   });
 
   it('echoes the identifier back flat, as codeloc', async () => {
-    // The asymmetry is the API's, not the SDK's: `aadl{}` goes out nested and comes
-    // back flattened, alongside `reference`, `contractNumber` and `phoneNumber`.
+    // `aadl{}` goes out nested and comes back flat, like every other identifier.
     const s = stubFetch([{ json: ok(aadlTxn()) }]);
     const c = new BillPayClient({ apiKey: 'k', baseUrl: 'http://api.test', fetch: s.fetch });
 
@@ -520,20 +517,14 @@ describe('SEAAL takes a code_client and a code_contrat, both of them', () => {
   });
 
   it('rejects the flat codeClient echo as a request identifier at compile time', () => {
-    // @ts-expect-error — `codeClient` is what comes *back*. Nothing flat goes out: SEAAL
-    // has no single key that identifies an account, which is the whole reason the
-    // request form is a nested pair rather than a shorthand like `reference`.
+    // @ts-expect-error — `codeClient` is the output echo, not a request identifier.
     const bad: AccountIdentifier = { codeClient: '471135' };
     expect(bad).toBeDefined();
   });
 
-  it('echoes the identifier back flat, as codeClient rather than reference', async () => {
-    // The same asymmetry as `aadl{}` → `codeloc`: the pair goes out nested and a single
-    // flat key comes home. Worth pinning because `reference` is the key a reader expects
-    // here — that one is ADE's, and SEAAL has never used it.
-    //
-    // The body below is the fully settled account: READY with an empty `bills`, which is
-    // a result rather than a failure. The water bill is paid; there is nothing to pick.
+  it('echoes the identifier back flat, as codeClient', async () => {
+    // The pair goes out nested and the client code alone comes back. READY with an
+    // empty `bills` is a result (nothing due), not a failure.
     const s = stubFetch([
       {
         json: ok(
@@ -552,18 +543,15 @@ describe('SEAAL takes a code_client and a code_contrat, both of them', () => {
 describe('account identifier union', () => {
   it('accepts each valid single-identifier form', async () => {
     const accounts: AccountIdentifier[] = [
-      { reference: '0123456789012345678901234' },
-      { contractNumber: '9876543210' },
-      { phoneNumber: '023456789' },
       { electronic_payment_key: '0123456789012345678901234' },
       { phone_number: '023456789' },
       { sonelgaz: { invoice_number: '9876543210', amount_without_stamp: '15000', ebb_key: 'ABC' } },
-      { ade: { sub_id: '000123456789', period: '07/2026', amount: '12000', pay_key: '1234567' } },
       { aadl: { codeloc: '1112223334' } },
+      { aadl: { codeloc: '1112223334', billnum: '900000001', amount: '5400.00' } },
       { seaal: { code_client: '471135', code_contrat: '446547' } },
     ];
 
-    expect(accounts).toHaveLength(9);
+    expect(accounts).toHaveLength(6);
 
     for (const account of accounts) {
       const { c, s } = discovering();
@@ -576,36 +564,44 @@ describe('account identifier union', () => {
     }
   });
 
+  it('rejects the retired camelCase aliases at compile time', () => {
+    // These are output echoes. The API refuses them on input with 400 ERR_VALIDATION.
+    // @ts-expect-error — `reference` is not a request identifier.
+    const a: AccountIdentifier = { reference: '0123456789012345678901234' };
+    // @ts-expect-error — `contractNumber` is not a request identifier.
+    const b: AccountIdentifier = { contractNumber: '9876543210' };
+    // @ts-expect-error — `phoneNumber` is not a request identifier; use `phone_number`.
+    const c: AccountIdentifier = { phoneNumber: '023456789' };
+    expect([a, b, c]).toHaveLength(3);
+  });
+
+  it('rejects the retired nested ade shape at compile time', () => {
+    const bad: AccountIdentifier = {
+      // @ts-expect-error — ADE is addressed by `electronic_payment_key` only.
+      ade: { sub_id: '000123456789', period: '07/2026', amount: '12000', pay_key: '1234567' },
+    };
+    expect(bad).toBeDefined();
+  });
+
   it('rejects two flat identifiers at compile time', () => {
     // @ts-expect-error — exactly one identifier is allowed, never two.
-    const bad: AccountIdentifier = { reference: 'a', contractNumber: 'b' };
+    const bad: AccountIdentifier = { electronic_payment_key: 'a', phone_number: 'b' };
     expect(bad).toBeDefined();
   });
 
   it('rejects a nested form combined with a flat one at compile time', () => {
-    // @ts-expect-error — `sonelgaz` and `reference` are mutually exclusive.
+    // @ts-expect-error — `sonelgaz` and `electronic_payment_key` are mutually exclusive.
     const bad: AccountIdentifier = {
-      reference: 'a',
+      electronic_payment_key: 'a',
       sonelgaz: { invoice_number: '1', amount_without_stamp: '2', ebb_key: '3' },
     };
     expect(bad).toBeDefined();
   });
 
-  it('rejects two nested forms at compile time', () => {
-    // @ts-expect-error — `ade` and `aadl` are different slots, and only one may be filled.
+  it('rejects a SEAAL pair combined with a flat key at compile time', () => {
+    // @ts-expect-error — one slot only.
     const bad: AccountIdentifier = {
-      ade: { sub_id: '000123456789', period: '07/2026', amount: '1', pay_key: '1234567' },
-      aadl: { codeloc: '1112223334' },
-    };
-    expect(bad).toBeDefined();
-  });
-
-  it('rejects a SEAAL pair combined with a flat reference at compile time', () => {
-    // @ts-expect-error — `seaal` and `reference` are different slots, and one is the
-    // limit. The pairing is worth its own case because `reference` is precisely the key
-    // SEAAL was wrongly documented as using, so it is the one a caller reaches for.
-    const bad: AccountIdentifier = {
-      reference: '0123456789012345678901234',
+      electronic_payment_key: '0123456789012345678901234',
       seaal: { code_client: '471135', code_contrat: '446547' },
     };
     expect(bad).toBeDefined();
@@ -631,7 +627,7 @@ describe('account identifier union', () => {
     // out of `AccountKey` and no member pins `seaal?: never`, two identifiers start
     // type-checking in every non-literal position, and this line is what notices.
     const twoIdentifiers = {
-      reference: '0123456789012345678901234',
+      electronic_payment_key: '0123456789012345678901234',
       seaal: { code_client: '471135', code_contrat: '446547' },
     };
 
@@ -642,13 +638,7 @@ describe('account identifier union', () => {
 
   it('rejects an AADL identifier paired with a landline at compile time', () => {
     // @ts-expect-error — one slot, whichever two the caller happens to have to hand.
-    const bad: AccountIdentifier = { aadl: { codeloc: '1112223334' }, phoneNumber: '023456789' };
-    expect(bad).toBeDefined();
-  });
-
-  it('rejects the snake_case and camelCase phone forms together at compile time', () => {
-    // @ts-expect-error — they are the same slot spelled two ways, not two slots.
-    const bad: AccountIdentifier = { phoneNumber: '023456789', phone_number: '023456789' };
+    const bad: AccountIdentifier = { aadl: { codeloc: '1112223334' }, phone_number: '023456789' };
     expect(bad).toBeDefined();
   });
 

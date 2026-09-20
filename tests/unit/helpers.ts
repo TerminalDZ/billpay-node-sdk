@@ -153,7 +153,7 @@ export const txn = (over: Record<string, unknown> = {}): Record<string, unknown>
   type: 'discovery',
   status: 'PENDING',
   partner: 'ADE',
-  account: { reference: '0123456789012345678901234' },
+  account: { reference: '0123456789012345678901234' }, // echoed flat by the API
   currency: 'DZD',
   createdAt: '2026-09-01T00:00:00.000Z',
   updatedAt: '2026-09-01T00:00:00.000Z',

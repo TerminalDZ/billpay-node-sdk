@@ -3,6 +3,33 @@
 All notable changes to `@terminaldz/billpay-sdk`. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.6.0 — 2026-09-20
+
+Aligns the SDK with the API's identifier contract and the current sandbox behaviour.
+
+### Breaking
+
+- **`AccountIdentifier` now has five members, one per partner:** `ElectronicPaymentKeyAccount`
+  (ADE), `PhoneNumberAccount` (Algérie Télécom, now `phone_number`), `SonelgazAccount`,
+  `AadlAccount`, `SeaalAccount`. The camelCase aliases `reference`, `contractNumber` and
+  `phoneNumber`, and the nested `ade` object, are removed: the API rejects them with
+  `400 ERR_VALIDATION` (`contractNumber` was never usable by SONELGAZ, and no portal
+  consumes the nested `ade` shape). `ReferenceAccount`, `ContractNumberAccount`,
+  `PhoneNumberSnakeAccount` and `AdeInvoiceAccount` are gone; `SonelgazInvoiceAccount` is
+  renamed `SonelgazAccount`.
+- **Examples and the integration suite no longer embed a sandbox key.** Set
+  `BILLPAY_API_KEY` / `BILLPAY_SANDBOX_KEY`.
+
+### Changed
+
+- `AadlAccount` accepts `billnum` and `amount` together (DIRECT mode).
+- `Transaction.selectedBills` is typed: the itemised bills of a multi-bill order.
+- Documentation follows the deployment: the pay ref must differ from the discovery ref
+  (`403 DUPLICATED_REF`); `list()` rows carry `bills`, `selectedBills` and `error`;
+  `avis()` is live in production and answers `NOT_FOUND` in the sandbox; sandbox fees use
+  the real per-partner rule; there is no 200 DZD discovery floor.
+- JSDoc, README and examples rewritten to state the contract concisely.
+
 ## 0.5.0 — 2026-09-20
 
 A SEAAL customer owing five quarters used to pay five times — and be charged the 30 DZD

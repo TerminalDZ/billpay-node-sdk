@@ -68,7 +68,7 @@ describe('waitForReady', () => {
   });
 
   it('resolves on READY with an empty bills array', async () => {
-    // Nothing due, or everything owed is under the 200 DZD floor. Not an error.
+    // Nothing due. Not an error.
     const { c } = poller(['READY'], { bills: [] });
 
     const p = c.bills.waitForReady(TXN_ID, POLL);
@@ -527,7 +527,7 @@ describe('input guards', () => {
     const c = new BillPayClient({ apiKey: 'k', baseUrl: 'http://api.test', fetch: s.fetch });
 
     await expect(
-      c.bills.discover({ partner: 'ADE', account: { reference: 'x' }, ref: '  ' }),
+      c.bills.discover({ partner: 'ADE', account: { electronic_payment_key: 'x' }, ref: '  ' }),
     ).rejects.toBeInstanceOf(BillPayValidationError);
     expect(s.calls).toHaveLength(0);
   });
@@ -537,7 +537,11 @@ describe('input guards', () => {
     const c = new BillPayClient({ apiKey: 'k', baseUrl: 'http://api.test', fetch: s.fetch });
 
     await expect(
-      c.bills.discover({ partner: 'ADE', account: { reference: 'x' }, ref: 'a'.repeat(101) }),
+      c.bills.discover({
+        partner: 'ADE',
+        account: { electronic_payment_key: 'x' },
+        ref: 'a'.repeat(101),
+      }),
     ).rejects.toBeInstanceOf(BillPayValidationError);
   });
 

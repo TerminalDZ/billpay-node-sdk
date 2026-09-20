@@ -73,14 +73,16 @@ const AADL = {
   settled: '4445556667',
 } as const;
 
-/** ADE references. Twenty-five characters, and the digits choose the ending. */
+/** ADE electronic payment keys. Twenty-five characters; the digits choose the scenario. */
 const ADE = {
   /** READY, one bill @ 443.39, pays to SUCCESS. The documented end-to-end run. */
   happy: '0123456789012345678901234',
   /** READY, `bills: []`. */
   nothingDue: '0123456789012340000000002',
-  /** READY, `bills: []` — one 150.00 bill, filtered by the 200 DZD floor. */
-  underFloor: '0123456789012341111111111',
+  /** READY, `bills: []` — the second nothing-due variant. */
+  nothingDue2: '0123456789012341111111111',
+  /** READY, one bill @ 600.00, debited then reversed: REFUNDED (prefix-matched key). */
+  refundedPrefix: '0001234567890000000000000',
   /** READY, one bill @ 400.00, pays to FAILED + PAYMENT_DECLINED. */
   declined: '0123456789012340000000004',
   /** READY, one bill @ 550.00, debited then reversed: REFUNDED. */
@@ -93,20 +95,12 @@ const ADE = {
   alreadyPaid: '0123456789012347777777777',
 } as const;
 
-/** The nested ADE invoice form: a different identifier slot, debited then refunded. */
-const ADE_INVOICE = {
-  sub_id: '000123456789',
-  period: '07/2026',
-  amount: '12000',
-  pay_key: '1234567',
-} as const;
-
 /** SONELGAZ invoices. All three fields are required whatever the scenario. */
 const SONELGAZ = {
   /** READY, two bills @ 1200.00 and 850.00 — the multi-bill picker. */
   multi: { invoice_number: '9876543210', amount_without_stamp: '15000', ebb_key: 'ABC123' },
-  /** READY, `bills: []` — everything owed is under the floor. */
-  underFloor: { invoice_number: '0000000003', amount_without_stamp: '15000', ebb_key: 'ABC123' },
+  /** READY, `bills: []` — nothing due. */
+  nothingDue: { invoice_number: '0000000003', amount_without_stamp: '15000', ebb_key: 'ABC123' },
   /** READY, one bill @ 900.00, then `UNKNOWN` for about a minute before REFUNDED. */
   review: { invoice_number: '6006006006', amount_without_stamp: '15000', ebb_key: 'ABC123' },
 } as const;
@@ -115,13 +109,8 @@ const SONELGAZ = {
 const LANDLINE = '023456789';
 
 /**
- * SEAAL water accounts. The identifier is a **pair** and both halves are mandatory:
- * `code_client` is 2–6 alphanumeric characters, `code_contrat` is 2–10 digits. There is
- * no flat shorthand — `reference` is ADE's and has never reached SEAAL, whatever earlier
- * versions of this file asserted while the biller was switched off.
- *
- * The sandbox branches on `code_client` alone; `code_contrat` is an authentication
- * factor, not a selector, so the same one is used throughout.
+ * SEAAL water accounts: the pair `{ code_client, code_contrat }`, both mandatory. The
+ * sandbox branches on `code_client` alone.
  */
 const SEAAL = {
   /** READY, five unpaid quarterly factures — the signature multi-bill shape. */
@@ -282,7 +271,7 @@ describe.skipIf(!liveAadl)('AADL — one aggregate avis, addressed by codeloc', 
       expect(txn.bills).toHaveLength(1);
       const avis = txn.bills![0]!;
       expect(avis.amount).toBe(5400);
-      expect(avis.fee).toBe(0);
+      expect(avis.fee).toBeGreaterThan(0);
       expect(avis.period).toBe('Août 2026');
       expect(avis.label).toBeTruthy();
 
@@ -318,7 +307,7 @@ describe.skipIf(!liveAadl)('AADL — one aggregate avis, addressed by codeloc', 
 
       const avis = d.txn.bills![0]!;
       expect(avis.amount).toBe(12000);
-      expect(avis.fee).toBe(0);
+      expect(avis.fee).toBeGreaterThan(0);
       expect(avis.period).toBe('Juillet 2026');
 
       const breakdown = avis.breakdown!;
@@ -420,10 +409,9 @@ describe.skipIf(!liveAadl)('AADL — one aggregate avis, addressed by codeloc', 
       expect(settled.completedAt).toBeTruthy();
       expect(settled.error).toBeUndefined();
 
-      // Sandbox charges no fee, so `total === amount` here and an integration that
-      // quietly bills `amount` looks correct right up until production.
+      // The sandbox applies the real per-partner fee rule, so `total` includes it.
       expect(settled.total).toBe(bill.amount + bill.fee);
-      expect(bill.fee).toBe(0);
+      expect(bill.fee).toBeGreaterThan(0);
 
       const receipt = await c.bills.receipt(d.txn.transactionId);
       expect(receipt.bytes.byteLength).toBeGreaterThan(0);
@@ -466,7 +454,11 @@ describe.skipIf(!liveAde)('ADE — discovery outcomes', () => {
   it(
     'the happy path is READY with one 443.39 DZD bill',
     async () => {
-      const { ack, txn } = await discoverReady('ADE', { reference: ADE.happy }, 'ade-happy');
+      const { ack, txn } = await discoverReady(
+        'ADE',
+        { electronic_payment_key: ADE.happy },
+        'ade-happy',
+      );
 
       expect(ack.status).toBe('PENDING');
       expect(ack.transactionId).toMatch(/^[0-9a-f]{24}$/);
@@ -475,7 +467,7 @@ describe.skipIf(!liveAde)('ADE — discovery outcomes', () => {
       expect(txn.account).toEqual({ reference: ADE.happy });
       expect(txn.bills).toHaveLength(1);
       expect(txn.bills![0]!.amount).toBe(443.39);
-      expect(txn.bills![0]!.fee).toBe(0);
+      expect(txn.bills![0]!.fee).toBeGreaterThan(0);
       // Only AADL publishes one today; nothing else may assume it exists.
       expect(txn.bills![0]!.breakdown).toBeUndefined();
     },
@@ -485,7 +477,11 @@ describe.skipIf(!liveAde)('ADE — discovery outcomes', () => {
   it(
     'nothing due is READY with an empty bills array, not an error',
     async () => {
-      const { txn } = await discoverReady('ADE', { reference: ADE.nothingDue }, 'ade-nothing-due');
+      const { txn } = await discoverReady(
+        'ADE',
+        { electronic_payment_key: ADE.nothingDue },
+        'ade-nothing-due',
+      );
 
       expect(txn.status).toBe('READY');
       expect(txn.bills).toEqual([]);
@@ -495,9 +491,13 @@ describe.skipIf(!liveAde)('ADE — discovery outcomes', () => {
   );
 
   it(
-    'a balance under the 200 DZD floor discovers as nothing payable',
+    'the second nothing-due key discovers as nothing payable',
     async () => {
-      const { txn } = await discoverReady('ADE', { reference: ADE.underFloor }, 'ade-under-floor');
+      const { txn } = await discoverReady(
+        'ADE',
+        { electronic_payment_key: ADE.nothingDue2 },
+        'ade-nothing-due-2',
+      );
 
       // Indistinguishable from "nothing due" on the wire, and that is the point: the
       // customer is told nothing is payable, never that nothing is owed.
@@ -508,12 +508,12 @@ describe.skipIf(!liveAde)('ADE — discovery outcomes', () => {
   );
 
   it(
-    'a malformed reference is 400 INVALID_ACCOUNT — the one to show the customer',
+    'a malformed key is 400 INVALID_ACCOUNT — the one to show the customer',
     async () => {
       const e = await rejection<BillPayValidationError>(
         client().bills.discover({
           partner: 'ADE',
-          account: { reference: ADE.malformed },
+          account: { electronic_payment_key: ADE.malformed },
           ref: mintRef('ade-malformed'),
         }),
       );
@@ -532,7 +532,7 @@ describe.skipIf(!liveAde)('ADE — discovery outcomes', () => {
       const e = await rejection<BillPayUnavailableError>(
         client().bills.discover({
           partner: 'ADE',
-          account: { reference: ADE.unreachable },
+          account: { electronic_payment_key: ADE.unreachable },
           ref: mintRef('ade-unreachable'),
         }),
       );
@@ -552,7 +552,7 @@ describe.skipIf(!liveAde)('ADE — discovery outcomes', () => {
       const e = await rejection<BillPayConflictError>(
         client().bills.discover({
           partner: 'ADE',
-          account: { reference: ADE.alreadyPaid },
+          account: { electronic_payment_key: ADE.alreadyPaid },
           ref: mintRef('ade-already-paid'),
         }),
       );
@@ -571,12 +571,12 @@ describe.skipIf(!liveAde)('ADE — discovery outcomes', () => {
       const ref = mintRef('ade-duplicate');
 
       const first = await withRateLimitRetry(() =>
-        c.bills.discover({ partner: 'ADE', account: { reference: ADE.happy }, ref }),
+        c.bills.discover({ partner: 'ADE', account: { electronic_payment_key: ADE.happy }, ref }),
       );
       expect(first.ref).toBe(ref);
 
       const e = await rejection<BillPayConflictError>(
-        c.bills.discover({ partner: 'ADE', account: { reference: ADE.happy }, ref }),
+        c.bills.discover({ partner: 'ADE', account: { electronic_payment_key: ADE.happy }, ref }),
       );
 
       expect(e).toBeInstanceOf(BillPayConflictError);
@@ -597,7 +597,11 @@ describe.skipIf(!liveAde)('ADE — payment outcomes', () => {
     'the happy path pays to SUCCESS and the receipt downloads',
     async () => {
       const c = client();
-      const d = await discoverReady('ADE', { reference: ADE.happy }, 'ade-pay-success');
+      const d = await discoverReady(
+        'ADE',
+        { electronic_payment_key: ADE.happy },
+        'ade-pay-success',
+      );
       const bill = d.txn.bills![0]!;
 
       const { ack, settled } = await payFirstBill(d);
@@ -616,7 +620,11 @@ describe.skipIf(!liveAde)('ADE — payment outcomes', () => {
   it(
     'a declined payment settles FAILED with PAYMENT_DECLINED and no debit',
     async () => {
-      const d = await discoverReady('ADE', { reference: ADE.declined }, 'ade-declined');
+      const d = await discoverReady(
+        'ADE',
+        { electronic_payment_key: ADE.declined },
+        'ade-declined',
+      );
       expect(d.txn.bills![0]!.amount).toBe(400);
 
       const { settled } = await payFirstBill(d);
@@ -633,7 +641,11 @@ describe.skipIf(!liveAde)('ADE — payment outcomes', () => {
   it(
     'a late failure settles REFUNDED — money that moved and came back',
     async () => {
-      const d = await discoverReady('ADE', { reference: ADE.refunded }, 'ade-refunded');
+      const d = await discoverReady(
+        'ADE',
+        { electronic_payment_key: ADE.refunded },
+        'ade-refunded',
+      );
       expect(d.txn.bills![0]!.amount).toBe(550);
 
       const { settled } = await payFirstBill(d);
@@ -645,13 +657,15 @@ describe.skipIf(!liveAde)('ADE — payment outcomes', () => {
   );
 
   it(
-    'the nested ade{} invoice form is a distinct identifier slot, debited then reversed',
+    'a key starting with the refund prefix is debited then reversed',
     async () => {
-      const d = await discoverReady('ADE', { ade: ADE_INVOICE }, 'ade-invoice-refund');
+      const d = await discoverReady(
+        'ADE',
+        { electronic_payment_key: ADE.refundedPrefix },
+        'ade-prefix-refund',
+      );
 
-      // Sent nested, echoed flat as `reference` — the same flattening AADL does.
-      expect(d.txn.account['reference']).toBeTruthy();
-      expect(d.txn.account['ade']).toBeUndefined();
+      expect(d.txn.account['reference']).toBe(ADE.refundedPrefix);
       expect(d.txn.bills![0]!.amount).toBe(600);
 
       const { settled } = await payFirstBill(d);
@@ -664,7 +678,11 @@ describe.skipIf(!liveAde)('ADE — payment outcomes', () => {
   it(
     'paying a billId the transaction never held is 404 NOT_FOUND',
     async () => {
-      const d = await discoverReady('ADE', { reference: ADE.happy }, 'ade-unknown-bill');
+      const d = await discoverReady(
+        'ADE',
+        { electronic_payment_key: ADE.happy },
+        'ade-unknown-bill',
+      );
       expect(d.txn.bills).toHaveLength(1);
 
       const e = await rejection<BillPayNotFoundError>(
@@ -704,12 +722,12 @@ describe.skipIf(!liveSonelgaz)('SONELGAZ — the multi-bill partner', () => {
   );
 
   it(
-    'everything under the floor discovers as nothing payable',
+    'a settled SONELGAZ invoice discovers as nothing payable',
     async () => {
       const { txn } = await discoverReady(
         'SONELGAZ',
-        { sonelgaz: SONELGAZ.underFloor },
-        'sg-under-floor',
+        { sonelgaz: SONELGAZ.nothingDue },
+        'sg-nothing-due',
       );
 
       expect(txn.status).toBe('READY');
@@ -774,7 +792,7 @@ describe.skipIf(!liveTelecom)('Algérie Télécom — the landline row', () => {
   it(
     'an accented partner name round-trips and the landline discovers one bill',
     async () => {
-      const { txn } = await discoverReady('Algérie Télécom', { phoneNumber: LANDLINE }, 'at-line');
+      const { txn } = await discoverReady('Algérie Télécom', { phone_number: LANDLINE }, 'at-line');
 
       // The partner name comes back exactly as sent, accents and all. Anything that
       // slugs or normalises it on the way through breaks here.
@@ -798,14 +816,11 @@ describe.skipIf(!liveTelecom)('Algérie Télécom — the landline row', () => {
   it(
     'refuses the international spelling of the same landline',
     async () => {
-      // The one per-field format the SDK states precisely, so it is worth stating
-      // correctly: `+213…` is not an accepted way to write `023456789`. A front end that
-      // normalises phone input to E.164 gets ERR_VALIDATION — a code the SDK's own docs
-      // say to log and never show the customer, on a number they typed correctly.
+      // `+213…` is not an accepted spelling of `023456789`.
       const e = await rejection<BillPayValidationError>(
         client().bills.discover({
           partner: 'Algérie Télécom',
-          account: { phoneNumber: '+21323456789' },
+          account: { phone_number: '+21323456789' },
           ref: mintRef('at-e164'),
         }),
       );
@@ -824,10 +839,7 @@ describe.skipIf(!liveSeaal)('SEAAL — the pair goes out, one flat key comes hom
   it(
     'the code_client/code_contrat pair discovers several quarters and echoes codeClient',
     async () => {
-      // The two facts that make SEAAL unlike every other row in this file: the request
-      // identifier is a nested pair, and the response flattens it to `codeClient` — not
-      // to `reference`, which is ADE's and which this suite wrongly asserted for SEAAL
-      // for as long as the biller was switched off and the assertion never ran.
+      // The pair goes out nested and is echoed flat as `codeClient`.
       const { ack, txn } = await discoverReady('SEAAL', { seaal: SEAAL.quarters }, 'seaal-pair');
 
       expect(ack.status).toBe('PENDING');
@@ -876,7 +888,7 @@ describe.skipIf(!liveAde)('lookup and recovery', () => {
       const c = client();
       const ref = mintRef('ade-by-ref');
       const ack = await withRateLimitRetry(() =>
-        c.bills.discover({ partner: 'ADE', account: { reference: ADE.happy }, ref }),
+        c.bills.discover({ partner: 'ADE', account: { electronic_payment_key: ADE.happy }, ref }),
       );
 
       // The documented recovery path: pretend the POST response was lost and find the
@@ -930,10 +942,14 @@ describe.skipIf(!liveAde)('lookup and recovery', () => {
   );
 
   it(
-    'list omits bills, so get is the only way to read them',
+    'list rows carry the same bills as get',
     async () => {
       const c = client();
-      const { txn } = await discoverReady('ADE', { reference: ADE.happy }, 'ade-list-projection');
+      const { txn } = await discoverReady(
+        'ADE',
+        { electronic_payment_key: ADE.happy },
+        'ade-list-projection',
+      );
 
       const byId = await c.bills.get(txn.transactionId);
       expect(byId.bills).toHaveLength(1);
@@ -942,12 +958,9 @@ describe.skipIf(!liveAde)('lookup and recovery', () => {
         (t) => t.transactionId === txn.transactionId,
       );
 
-      // A server-side projection, not an SDK quirk: the same READY row lists with an
-      // empty `bills` however many it holds. Rendering a list page straight from this
-      // shows every customer "nothing payable".
       expect(listed).toBeDefined();
       expect(listed!.status).toBe('READY');
-      expect(listed!.bills).toEqual([]);
+      expect(listed!.bills).toEqual(byId.bills);
     },
     ROUND_TRIP,
   );

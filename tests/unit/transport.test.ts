@@ -226,7 +226,7 @@ describe('request headers and body', () => {
     ]);
 
     await c.bills.get(TXN_ID);
-    await c.bills.discover({ partner: 'ADE', account: { reference: 'x' }, ref: 'r' });
+    await c.bills.discover({ partner: 'ADE', account: { electronic_payment_key: 'x' }, ref: 'r' });
 
     expect(s.calls[0]!.headers['Content-Type']).toBeUndefined();
     expect(s.calls[1]!.headers['Content-Type']).toBe('application/json');
@@ -566,7 +566,9 @@ describe('retry policy', () => {
     // and tells you nothing about the first attempt. getByRef is the recovery path.
     const { c, s } = mk([{ status: 500, json: err('INTERNAL_ERROR') }], { retries: 3 });
 
-    const p = settled(c.bills.discover({ partner: 'ADE', account: { reference: 'x' }, ref: 'r1' }));
+    const p = settled(
+      c.bills.discover({ partner: 'ADE', account: { electronic_payment_key: 'x' }, ref: 'r1' }),
+    );
     await vi.advanceTimersByTimeAsync(10_000);
     await p;
 

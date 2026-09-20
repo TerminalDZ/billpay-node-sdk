@@ -39,17 +39,8 @@ import {
  */
 export const BASE_URL = process.env.BILLPAY_BASE_URL ?? 'https://api.oneclickdz.com';
 
-/**
- * The sandbox key, read from `BILLPAY_SANDBOX_KEY` with the published one as the
- * default so the suite runs with no setup.
- *
- * That default is deliberate rather than careless. A sandbox key reaches no biller and
- * moves nothing, the docs print it, and hard-coding it keeps a contributor from
- * discovering the suite only as a wall of skips. A key that is *not* sandbox is refused
- * below, whatever it was set to and however it got there.
- */
-export const SANDBOX_KEY =
-  process.env.BILLPAY_SANDBOX_KEY ?? '08fa18ec-f6d4-4f44-905f-de9acbc96f21';
+/** The sandbox key from `BILLPAY_SANDBOX_KEY`. Without it the suite skips; a non-sandbox key is refused below. */
+export const SANDBOX_KEY = process.env.BILLPAY_SANDBOX_KEY ?? '';
 
 /**
  * Opt-in flag for the one scenario that spends a lockout attempt.
@@ -117,12 +108,15 @@ let blocked: string | null = null;
 const describeFailure = (err: unknown): string =>
   (err instanceof Error ? `${err.name}: ${err.message}` : String(err)).replace(/\.$/, '');
 
-try {
-  // `retries: 0` matters here: a refused key must cost exactly one attempt against the
-  // lockout counter, never three.
-  identity = await client({ retries: 0, timeoutMs: 10_000 }).validate();
-} catch (err) {
-  blocked = `the API at ${BASE_URL} did not answer — ${describeFailure(err)}`;
+if (!SANDBOX_KEY) {
+  blocked = 'BILLPAY_SANDBOX_KEY is not set';
+} else {
+  try {
+    // `retries: 0`: a refused key must cost exactly one attempt against the lockout counter.
+    identity = await client({ retries: 0, timeoutMs: 10_000 }).validate();
+  } catch (err) {
+    blocked = `the API at ${BASE_URL} did not answer — ${describeFailure(err)}`;
+  }
 }
 
 if (identity && identity.apiKey.type !== 'SANDBOX') {
@@ -163,8 +157,8 @@ if (blocked) {
   console.warn(
     `\n[integration] SKIPPED — ${blocked}.\n` +
       `[integration] This suite runs against the live sandbox API at ${BASE_URL}.\n` +
-      `[integration] Set BILLPAY_SANDBOX_KEY to a sandbox key (the published one is the\n` +
-      `[integration] default) and re-run with a working network connection.\n`,
+      `[integration] Set BILLPAY_SANDBOX_KEY to a sandbox key and re-run with a working\n` +
+      `[integration] network connection.\n`,
   );
 } else {
   console.info(
