@@ -3,6 +3,13 @@
 All notable changes to `@terminaldz/billpay-sdk`. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.7.1 — 2026-09-21
+
+### Changed
+
+- README: the API still accepts the legacy request identifiers `reference` and
+  `phoneNumber` for existing integrations; the SDK types the documented shapes.
+
 ## 0.7.0 — 2026-09-20
 
 ### Breaking

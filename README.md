@@ -72,6 +72,9 @@ returns `'SANDBOX'` or `'PRODUCTION'`.
 Responses echo the identifier flat under a partner-specific key (`reference`,
 `contractNumber`, `codeClient`, `codeloc`, `phoneNumber`). Those keys are output only.
 
+The API still accepts the legacy request identifiers `reference` (ADE) and `phoneNumber`
+(Algérie Télécom) for integrations built on them; the SDK types the shapes above.
+
 `client.partners()` returns each partner's availability; read it when building the picker.
 
 ## Paying several bills
